@@ -94,6 +94,7 @@ type Server struct {
 	responseMu          sync.Mutex
 	responseMessages    map[string]map[string]respHistory
 	usage               *usageLog
+	benchmark           *benchmarkStore
 	generatedImages     map[string]generatedImage
 }
 
@@ -144,6 +145,7 @@ func New() (*Server, error) {
 		settings:            settings,
 		responseMessages:    map[string]map[string]respHistory{},
 		usage:               openUsageLog(),
+		benchmark:           &benchmarkStore{run: benchmarkRun{State: "idle"}},
 		generatedImages:     map[string]generatedImage{},
 	}, nil
 }
