@@ -1357,7 +1357,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 			text.WriteString(fragment)
 			return streamTextWithToolLookahead(&pending, fragment, toolMaps, body.ToolChoice, emitText)
 		}
-		res, err := s.chatWithAccountEvents(ctx, acc.ID, account, answerReq, func(ev chathub.StreamEvent) error {
+		streamEvent := func(ev chathub.StreamEvent) error {
 			if ev.Kind == "tool" && ev.ToolName != "" && len(ev.Arguments) > 0 {
 				streamedTools = append(streamedTools, detectedToolCall{ID: "call_" + uuid.NewString(), Name: ev.ToolName, Arguments: ev.Arguments})
 				return nil
@@ -1366,41 +1366,11 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 				return nil
 			}
 			return handleStreamText(ev.Text)
-		})
-		if err != nil && body.AccountID == "" && (body.ConversationID == "" || body.ConversationID == resolvedConversationID) && (IsRateLimited(err) || IsAuthFailure(err)) {
-			// A throttled stream may retry on the next healthy account: only the
-			// ": connected" preamble reached the client, so the retried stream is
-			// indistinguishable from a fresh request.
-			next, nerr := s.nextHealthyAccount(acc.ID)
-			if nerr != nil {
-				// no healthy alternative
-			} else {
-				failoverReq := answerReq
-				if body.ConversationID == resolvedConversationID {
-					failoverReq.ConversationID = ""
-					failoverReq.SessionID = ""
-				}
-				ctx2, cancel2 := context.WithTimeout(r.Context(), time.Duration(s.settings.get().ChatTimeoutSeconds)*time.Second)
-				defer cancel2()
-				res2, err2 := s.chatWithAccountEvents(ctx2, next.ID, chathub.Account{AccessToken: next.AccessToken, OID: next.OID, TID: next.TID}, failoverReq, func(ev chathub.StreamEvent) error {
-					if ev.Kind == "tool" && ev.ToolName != "" && len(ev.Arguments) > 0 {
-						streamedTools = append(streamedTools, detectedToolCall{ID: "call_" + uuid.NewString(), Name: ev.ToolName, Arguments: ev.Arguments})
-						return nil
-					}
-					if ev.Kind != "text" || ev.Text == "" {
-						return nil
-					}
-					return handleStreamText(ev.Text)
-				})
-				if err2 == nil {
-					res = res2
-					acc = next
-					err = nil
-				} else {
-					err = err2
-					s.accountPool.MarkFailure(next.ID, err2, rateLimitCooldown)
-				}
-			}
+		}
+		res, usedAccount, err := s.streamChatWithRecovery(ctx, acc, answerReq, streamEvent)
+		if usedAccount.ID != "" {
+			acc = usedAccount
+			account = chathub.Account{AccessToken: acc.AccessToken, OID: acc.OID, TID: acc.TID}
 		}
 		if err != nil {
 			log.Printf("[req-trace] id=%s stage=stream_error err=%v", requestID, err)

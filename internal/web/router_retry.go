@@ -72,7 +72,7 @@ func retryUpstream(ctx context.Context, stage string, operation func(attempt int
 			return err
 		}
 		last = operation(attempt)
-		if last == nil || !isRetryableUpstream(last) || attempt == attempts {
+		if last == nil || (!isRetryableUpstream(last) && !IsRateLimited(last) && !IsAuthFailure(last)) || attempt == attempts {
 			return last
 		}
 
