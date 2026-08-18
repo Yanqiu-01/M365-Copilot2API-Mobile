@@ -1,0 +1,184 @@
+﻿package web
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"m365-copilot2api/internal/chathub"
+)
+
+// UpstreamHTTPError carries the HTTP status of a failed upstream request so
+// callers can distinguish rate limiting (429), authorization issues (401/403)
+// and transient server errors (5xx) from one another.
+type UpstreamHTTPError struct {
+	Status     int
+	RetryAfter int
+	Body       string
+}
+
+func (e *UpstreamHTTPError) Error() string {
+	return fmt.Sprintf("upstream http %d", e.Status)
+}
+
+// IsRateLimited reports whether err represents an upstream 429 or an
+// indistinguishable throttling signal (rate limit, too many requests,
+// throttled).
+func IsRateLimited(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, chathub.ErrRateLimitNotice) {
+		return true
+	}
+	var httpErr *UpstreamHTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.Status == 429 || httpErr.Status == 503
+	}
+	var dialErr *chathub.DialError
+	if errors.As(err, &dialErr) {
+		return dialErr.Status == 429 || dialErr.Status == 503
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "429") ||
+		strings.Contains(msg, "too many requests") ||
+		strings.Contains(msg, "rate limit") ||
+		strings.Contains(msg, "throttl")
+}
+
+// IsAuthFailure reports whether err represents an upstream 401/403, meaning
+// the account itself is unusable until re-authenticated.
+func IsAuthFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	var httpErr *UpstreamHTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.Status == 401 || httpErr.Status == 403
+	}
+	var dialErr *chathub.DialError
+	if errors.As(err, &dialErr) {
+		return dialErr.Status == 401 || dialErr.Status == 403
+	}
+	return false
+}
+
+func IsEmptyCompletion(err error) bool {
+	return errors.Is(err, chathub.ErrEmptyCompletion)
+}
+
+// RetryAfterSeconds returns the upstream Retry-After hint for a rate-limited
+// error, or 0 when absent. The web layer surfaces this to clients so they can
+// back off instead of hammering a throttled pool.
+func RetryAfterSeconds(err error) int {
+	var httpErr *UpstreamHTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.RetryAfter
+	}
+	var dialErr *chathub.DialError
+	if errors.As(err, &dialErr) {
+		return dialErr.RetryAfter
+	}
+	return 0
+}
+
+// accountHealth tracks per-account failure state: rate-limited accounts are
+// cooled down and skipped by the round-robin until the window expires, and
+// auth-failed accounts are pinned as unusable.
+type accountHealth struct {
+	mu       sync.Mutex
+	cooldown map[string]time.Time
+	authFail map[string]bool
+}
+
+func newAccountHealth() *accountHealth {
+	return &accountHealth{cooldown: map[string]time.Time{}, authFail: map[string]bool{}}
+}
+
+// MarkFailure records the outcome of a request for one account.
+// rateLimited cools the account down for window; authFailed pins it.
+// When the error carries an upstream Retry-After hint, that value is used
+// instead of the caller-supplied window (capped at 30 minutes).
+func (h *accountHealth) MarkFailure(accountID string, err error, window time.Duration) {
+	if window <= 0 {
+		window = 60 * time.Second
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if IsAuthFailure(err) {
+		cooldown := window
+		if cooldown > 2*time.Minute {
+			cooldown = 2 * time.Minute
+		}
+		h.cooldown[accountID] = time.Now().Add(cooldown)
+		delete(h.authFail, accountID)
+		return
+	}
+	if IsRateLimited(err) {
+		delete(h.authFail, accountID)
+		cd := window
+		if ra := RetryAfterSeconds(err); ra > 0 {
+			cd = time.Duration(ra) * time.Second
+			if cd > 30*time.Minute {
+				cd = 30 * time.Minute
+			}
+		}
+		h.cooldown[accountID] = time.Now().Add(cd)
+	}
+}
+
+// MarkSuccess clears any failure state after a healthy response.
+func (h *accountHealth) MarkSuccess(accountID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.cooldown, accountID)
+	delete(h.authFail, accountID)
+}
+
+// Available reports whether the account may be used right now.
+func (h *accountHealth) Available(accountID string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.authFail[accountID] {
+		return false
+	}
+	if until, ok := h.cooldown[accountID]; ok && time.Now().Before(until) {
+		return false
+	}
+	return true
+}
+
+// Snapshot returns a copy of the current health state for the admin UI.
+func (h *accountHealth) Snapshot() map[string]map[string]any {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make(map[string]map[string]any, len(h.cooldown)+len(h.authFail))
+	for id, until := range h.cooldown {
+		out[id] = map[string]any{"available": time.Now().After(until), "cooldownUntil": until}
+	}
+	for id, failed := range h.authFail {
+		if failed {
+			if _, ok := out[id]; !ok {
+				out[id] = map[string]any{}
+			}
+			out[id]["authFailed"] = true
+		}
+	}
+	return out
+}
+
+// EarliestRecovery returns the earliest time at which any account may become
+// available again. Used to populate Retry-After when all accounts are cooling.
+func (h *accountHealth) EarliestRecovery() time.Time {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	earliest := time.Now().Add(5 * time.Minute)
+	for _, until := range h.cooldown {
+		if until.Before(earliest) {
+			earliest = until
+		}
+	}
+	return earliest
+}
