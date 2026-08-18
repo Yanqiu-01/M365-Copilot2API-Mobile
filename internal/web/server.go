@@ -1132,6 +1132,10 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
+	if reason := oversizeReason(len(body.Messages), len(raw)); reason != "" {
+		writeOpenAIError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", reason)
+		return
+	}
 	responseFormat := body.ResponseFormat
 	effort := body.ReasoningEffort
 	if body.Reasoning != nil && strings.TrimSpace(body.Reasoning.Effort) != "" {
