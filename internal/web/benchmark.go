@@ -2,9 +2,15 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"path"
+	"sort"
+	"strings"
 	"sync"
 	"time"
+
+	"m365-copilot2api/internal/chathub"
 )
 
 // benchTask is the public task/run representation consumed by the APK-derived
@@ -153,4 +159,176 @@ func (s *benchmarkStore) stop() bool {
 
 func benchTaskCatalog() []benchTask {
 	return append([]benchTask(nil), benchTasks()...)
+}
+
+// benchWorkspace is the in-memory task filesystem used by the APK benchmark
+// agent. It deliberately does not expose host commands: benchmark tool calls
+// may only inspect or modify the supplied task artifacts.
+type benchWorkspace struct {
+	mu        sync.Mutex
+	files     map[string]string
+	testRuns  int
+	testsPass bool
+	wrote     bool
+	steps     int
+	redundant int
+	test      func(map[string]string) bool
+}
+
+func newBenchWorkspace(files map[string]string) *benchWorkspace {
+	workspace := &benchWorkspace{files: make(map[string]string)}
+	for name, content := range files {
+		if clean, err := cleanBenchPath(name); err == nil {
+			workspace.files[clean] = content
+		}
+	}
+	return workspace
+}
+
+// cleanBenchPath follows the APK's defensive path normalization: convert
+// Windows separators, reject empty/absolute/traversing paths, and retain a
+// clean slash-separated relative artifact name.
+func cleanBenchPath(name string) (string, error) {
+	name = strings.TrimSpace(strings.ReplaceAll(name, "\\", "/"))
+	if name == "" || strings.HasPrefix(name, "/") {
+		return "", fmt.Errorf("invalid benchmark path")
+	}
+	clean := path.Clean(name)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("benchmark path escapes workspace")
+	}
+	return clean, nil
+}
+
+func (w *benchWorkspace) snapshot() map[string]string {
+	if w == nil {
+		return map[string]string{}
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make(map[string]string, len(w.files))
+	for name, content := range w.files {
+		out[name] = content
+	}
+	return out
+}
+
+func (w *benchWorkspace) testStatus() (passed bool, runs int) {
+	if w == nil {
+		return false, 0
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.testsPass, w.testRuns
+}
+
+func (w *benchWorkspace) setTest(fn func(map[string]string) bool) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	w.test = fn
+	w.mu.Unlock()
+}
+
+// benchToolSchema returns the APK benchmark's constrained task tools. The
+// model cannot invoke arbitrary command execution through this schema.
+func benchToolSchema() []chathub.Tool {
+	definition := func(name, description string, parameters map[string]any) chathub.Tool {
+		body, _ := json.Marshal(map[string]any{
+			"name":        name,
+			"description": description,
+			"parameters":  parameters,
+		})
+		return chathub.Tool{Type: "function", Function: body}
+	}
+	pathParam := map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"path": map[string]any{"type": "string"}},
+		"required":   []string{"path"},
+	}
+	writeParam := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path":    map[string]any{"type": "string"},
+			"content": map[string]any{"type": "string"},
+		},
+		"required": []string{"path", "content"},
+	}
+	return []chathub.Tool{
+		definition("list_files", "List benchmark workspace files.", map[string]any{"type": "object", "properties": map[string]any{}}),
+		definition("read_file", "Read one benchmark workspace file.", pathParam),
+		definition("write_file", "Write one benchmark workspace file.", writeParam),
+		definition("run_tests", "Run the benchmark task checks against the current workspace.", map[string]any{"type": "object", "properties": map[string]any{}}),
+	}
+}
+
+// execute applies one constrained benchmark tool call and returns a structured
+// tool response. The implementation is intentionally deterministic so hidden
+// graders can assess artifact changes rather than host-side side effects.
+func (w *benchWorkspace) execute(name string, arguments map[string]any) (map[string]any, error) {
+	if w == nil {
+		return nil, fmt.Errorf("benchmark workspace unavailable")
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.steps++
+
+	asPath := func() (string, error) {
+		raw, ok := arguments["path"].(string)
+		if !ok {
+			return "", fmt.Errorf("path is required")
+		}
+		return cleanBenchPath(raw)
+	}
+
+	switch name {
+	case "list_files":
+		files := make([]string, 0, len(w.files))
+		for file := range w.files {
+			files = append(files, file)
+		}
+		sort.Strings(files)
+		return map[string]any{"files": files}, nil
+	case "read_file":
+		file, err := asPath()
+		if err != nil {
+			return nil, err
+		}
+		content, ok := w.files[file]
+		if !ok {
+			return nil, fmt.Errorf("file not found: %s", file)
+		}
+		return map[string]any{"path": file, "content": content}, nil
+	case "write_file":
+		file, err := asPath()
+		if err != nil {
+			return nil, err
+		}
+		content, ok := arguments["content"].(string)
+		if !ok {
+			return nil, fmt.Errorf("content is required")
+		}
+		if previous, exists := w.files[file]; exists && previous == content {
+			w.redundant++
+		} else {
+			w.wrote = true
+			w.files[file] = content
+		}
+		return map[string]any{"path": file, "bytes": len(content)}, nil
+	case "run_tests":
+		w.testRuns++
+		if w.test != nil {
+			files := make(map[string]string, len(w.files))
+			for file, content := range w.files {
+				files[file] = content
+			}
+			w.testsPass = w.test(files)
+		} else {
+			w.testsPass = false
+		}
+		return map[string]any{"passed": w.testsPass, "runs": w.testRuns}, nil
+	default:
+		return nil, fmt.Errorf("unsupported benchmark tool: %s", name)
+	}
 }
