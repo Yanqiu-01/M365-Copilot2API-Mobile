@@ -86,7 +86,34 @@ func (c *accountConcurrency) Snapshot() map[string]any {
 }
 
 func (s *Server) accountAvailable(accountID string) bool {
-	return s.accountPool.Available(accountID) && s.accountConcurrency.Available(accountID)
+	if !s.accountPool.Available(accountID) || !s.accountConcurrency.Available(accountID) {
+		return false
+	}
+	if s.upstreamCooldown == nil || s.tokens == nil {
+		return true
+	}
+	account, ok := s.tokens.Get(accountID)
+	return !ok || !s.upstreamCooldown.blocked(account.Email)
+}
+
+// recordUpstreamCooldown applies the APK's email-keyed backoff only to an
+// early retryable transport close. Ordinary application errors continue to be
+// tracked by accountHealth at their existing call sites.
+func (s *Server) recordUpstreamCooldown(accountID string, err error) {
+	if s == nil || s.upstreamCooldown == nil || s.tokens == nil {
+		return
+	}
+	account, ok := s.tokens.Get(accountID)
+	if !ok || account.Email == "" {
+		return
+	}
+	if err == nil {
+		s.upstreamCooldown.clear(account.Email)
+		return
+	}
+	if isEarlyUpstreamClose(err) {
+		s.upstreamCooldown.penalise(account.Email)
+	}
 }
 
 func (s *Server) chatWithAccount(ctx context.Context, accountID string, account chathub.Account, request chathub.Request) (chathub.Result, error) {
@@ -95,7 +122,9 @@ func (s *Server) chatWithAccount(ctx context.Context, accountID string, account 
 		return chathub.Result{}, err
 	}
 	defer release()
-	return s.chat.Chat(ctx, account, request)
+	result, err := s.chat.Chat(ctx, account, request)
+	s.recordUpstreamCooldown(accountID, err)
+	return result, err
 }
 
 func (s *Server) chatWithAccountEvents(ctx context.Context, accountID string, account chathub.Account, request chathub.Request, onEvent func(chathub.StreamEvent) error) (chathub.Result, error) {
@@ -104,7 +133,9 @@ func (s *Server) chatWithAccountEvents(ctx context.Context, accountID string, ac
 		return chathub.Result{}, err
 	}
 	defer release()
-	return s.chat.ChatWithEvents(ctx, account, request, onEvent)
+	result, err := s.chat.ChatWithEvents(ctx, account, request, onEvent)
+	s.recordUpstreamCooldown(accountID, err)
+	return result, err
 }
 
 func (s *Server) chatWithAccountReasoning(ctx context.Context, accountID string, account chathub.Account, request chathub.Request, onDelta, onReasoning func(string) error) (chathub.Result, error) {
@@ -113,5 +144,7 @@ func (s *Server) chatWithAccountReasoning(ctx context.Context, accountID string,
 		return chathub.Result{}, err
 	}
 	defer release()
-	return s.chat.ChatWithReasoning(ctx, account, request, onDelta, onReasoning)
+	result, err := s.chat.ChatWithReasoning(ctx, account, request, onDelta, onReasoning)
+	s.recordUpstreamCooldown(accountID, err)
+	return result, err
 }

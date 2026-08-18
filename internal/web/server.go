@@ -77,6 +77,7 @@ type Server struct {
 	mu                  sync.Mutex
 	tokens              *auth.Store
 	accountPool         *accountHealth
+	upstreamCooldown    *accountCooldown
 	accountConcurrency  *accountConcurrency
 	pkce                map[string]pendingPKCE
 	chat                *chathub.Client
@@ -123,6 +124,7 @@ func New() (*Server, error) {
 	return &Server{
 		tokens:             store,
 		accountPool:        newAccountHealth(),
+		upstreamCooldown:   newAccountCooldown(),
 		accountConcurrency: newAccountConcurrency(),
 		pkce:               map[string]pendingPKCE{},
 		chat: func() *chathub.Client {
@@ -696,16 +698,27 @@ func (s *Server) resolveAccount(accountID string) (auth.AccountToken, error) {
 			}
 			accountID = acc.ID
 		}
-		if !s.accountPool.Available(accountID) {
-			until := s.accountPool.EarliestRecovery()
-			retry := int(time.Until(until).Seconds())
-			if retry < 5 {
-				retry = 5
+		if !s.accountAvailable(accountID) {
+			if !s.accountPool.Available(accountID) {
+				until := s.accountPool.EarliestRecovery()
+				retry := int(time.Until(until).Seconds())
+				if retry < 5 {
+					retry = 5
+				}
+				return auth.AccountToken{}, &UpstreamHTTPError{Status: 429, RetryAfter: retry, Body: "all accounts are cooling down; try again later"}
 			}
-			return auth.AccountToken{}, &UpstreamHTTPError{Status: 429, RetryAfter: retry, Body: "all accounts are cooling down; try again later"}
-		}
-		if !s.accountConcurrency.Available(accountID) {
-			return auth.AccountToken{}, &UpstreamHTTPError{Status: 429, RetryAfter: 1, Body: "all accounts are at their concurrency limit; try again shortly"}
+			retry := 1
+			if s.upstreamCooldown != nil {
+				if candidate, exists := s.tokens.Get(accountID); exists {
+					if until, blocked := s.upstreamCooldown.snapshot()[candidate.Email]; blocked {
+						retry = int(time.Until(until).Seconds())
+						if retry < 1 {
+							retry = 1
+						}
+					}
+				}
+			}
+			return auth.AccountToken{}, &UpstreamHTTPError{Status: 429, RetryAfter: retry, Body: "all accounts are temporarily unavailable; try again shortly"}
 		}
 	}
 	return s.tokens.EnsureValid(accountID)
@@ -1477,7 +1490,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 			// to exactly one of the tools the client actually declared.
 			repairPrompt := modelToolRouterPrompt(prompt+"\n"+ledger.RouterContext(), toolMaps, "required") +
 				"\nREPAIR RULE: The previous upstream event selected an undeclared tool. Select one declared tool that performs the intended operation. Never return unknown_tool."
-			repairRes, repairErr := s.chat.Chat(ctx, account, chathub.Request{Text: repairPrompt, Tone: tone, Attachments: body.Attachments})
+			repairRes, repairErr := s.chatWithAccount(ctx, acc.ID, account, chathub.Request{Text: repairPrompt, Tone: tone, Attachments: body.Attachments})
 			if repairErr == nil {
 				repaired, parsed := parseModelToolDecision(repairRes.Text, toolMaps, body.ToolChoice)
 				if parsed {
@@ -1800,7 +1813,7 @@ APPLICATION_REQUEST_AND_EVIDENCE:
 	if len(toolMaps) > 0 && isSandboxHallucination(res.Text) {
 		log.Printf("[sandbox-eject] model used code interpreter/sandbox, retrying with explicit tool instruction")
 		correction := "CRITICAL: You must NOT use any built-in code interpreter, Python sandbox, or cloud execution environment. The caller has provided a bash tool that runs Windows PowerShell 5.1 on their local machine — use it to execute any commands or code. Do NOT say you cannot run code. Do NOT say you only have a Linux container. Call the bash tool NOW with the appropriate command.\n\nUser request:\n" + prompt
-		res2, err2 := s.chat.Chat(ctx, account, chathub.Request{Text: correction, Tone: tone, Attachments: body.Attachments})
+		res2, err2 := s.chatWithAccount(ctx, acc.ID, account, chathub.Request{Text: correction, Tone: tone, Attachments: body.Attachments})
 		if err2 == nil && !isSandboxHallucination(res2.Text) {
 			res = res2
 		}
