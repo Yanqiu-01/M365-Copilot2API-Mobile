@@ -2,6 +2,14 @@ package web
 
 import "testing"
 
+func TestGradeShiftAPKExpectedOutput(t *testing.T) {
+	files := map[string]string{"schedule.json": `{"Mon":"Dan","Tue":"Ben","Wed":"Cara","Thu":"Ann"}`}
+	passed, total, failures := gradeShift(files)
+	if passed != total || total != 10 || len(failures) != 0 {
+		t.Fatalf("passed=%d total=%d failures=%v", passed, total, failures)
+	}
+}
+
 func TestGradeSalesAPKExpectedOutput(t *testing.T) {
 	files := map[string]string{"report.json": `{
 		"revenueByRegion":{"north":80,"south":80,"east":70},

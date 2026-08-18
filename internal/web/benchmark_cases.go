@@ -118,6 +118,74 @@ func stringSlice(value any) []string {
 	return out
 }
 
+// gradeShift verifies the APK scheduling task. The constraints embedded in
+// the task/scorer yield the unique schedule Mon=Dan, Tue=Ben, Wed=Cara,
+// Thu=Ann. The direct assignments and individual constraints are both kept in
+// the report so a nearly-correct artifact still gets useful diagnostics.
+func gradeShift(files map[string]string) (int, int, []string) {
+	report := &gradeReport{}
+	artifact, err := readJSONArtifact(files, "schedule.json")
+	if err != nil {
+		report.total = 9
+		report.failures = append(report.failures, err.Error())
+		return report.tally()
+	}
+	day := func(name string) string { return strings.TrimSpace(fmt.Sprint(artifact[name])) }
+	mon, tue, wed, thu := day("Mon"), day("Tue"), day("Wed"), day("Thu")
+	report.eq("Mon person", mon, "Dan")
+	report.eq("Tue person", tue, "Ben")
+	report.eq("Wed person", wed, "Cara")
+	report.eq("Thu person", thu, "Ann")
+
+	people := []string{mon, tue, wed, thu}
+	seen := map[string]bool{}
+	for _, person := range people {
+		seen[strings.ToLower(person)] = true
+	}
+	report.total++
+	if len(seen) == 4 && !seen[""] {
+		report.passed++
+	} else {
+		report.failures = append(report.failures, "four assigned names must be distinct")
+	}
+
+	index := map[string]int{}
+	for i, person := range people {
+		index[strings.ToLower(person)] = i
+	}
+	report.total++
+	if !strings.EqualFold(mon, "Ann") {
+		report.passed++
+	} else {
+		report.failures = append(report.failures, "constraint 1: Ann must not be Mon")
+	}
+	report.total++
+	if strings.EqualFold(mon, "Ben") || strings.EqualFold(tue, "Ben") {
+		report.passed++
+	} else {
+		report.failures = append(report.failures, "constraint 2: Ben must be Mon or Tue")
+	}
+	report.total++
+	if index["cara"] > index["dan"] {
+		report.passed++
+	} else {
+		report.failures = append(report.failures, "constraint 3: Cara must be later than Dan")
+	}
+	report.total++
+	if !strings.EqualFold(tue, "Dan") {
+		report.passed++
+	} else {
+		report.failures = append(report.failures, "constraint 4: Dan must not be Tue")
+	}
+	report.total++
+	if len([]rune(wed)) == 4 {
+		report.passed++
+	} else {
+		report.failures = append(report.failures, "constraint 5: Wed must be a four-letter name")
+	}
+	return report.tally()
+}
+
 // gradeSales verifies the APK sales task. The source data embedded in the APK
 // yields north=80, south=80, east=70, total=230, top month 2026-02; north and
 // south are tied for top region and either value is accepted.
