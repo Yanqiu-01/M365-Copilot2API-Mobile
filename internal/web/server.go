@@ -186,6 +186,8 @@ func (s *Server) Routes() http.Handler {
 	m.HandleFunc("/api/admin/debug/wire/toggle", s.handleWireFramesToggle)
 	m.HandleFunc("/api/admin/debug/router-frames", s.handleRouterFrames)
 	m.HandleFunc("/api/admin/debug/router-frames/toggle", s.handleRouterFramesToggle)
+	m.HandleFunc("/api/live", s.handleLiveness)
+	m.HandleFunc("/api/stages", s.handleStageLog)
 	m.HandleFunc("/api/health", s.health)
 	m.HandleFunc("/api/version", s.version)
 	m.HandleFunc("/api/update", s.update)
@@ -233,7 +235,7 @@ func (s *Server) adminMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if r.URL.Path == "/api/admin/login" || r.URL.Path == "/api/admin/session" || r.URL.Path == "/api/admin/change-password" || r.URL.Path == "/api/admin/logout" || r.URL.Path == "/api/auth/start" || r.URL.Path == "/api/auth/status" || r.URL.Path == "/api/auth/callback" || r.URL.Path == "/" || r.URL.Path == "/login" {
+		if r.URL.Path == "/api/admin/login" || r.URL.Path == "/api/admin/session" || r.URL.Path == "/api/admin/change-password" || r.URL.Path == "/api/admin/logout" || r.URL.Path == "/api/auth/start" || r.URL.Path == "/api/auth/status" || r.URL.Path == "/api/auth/callback" || r.URL.Path == "/api/live" || r.URL.Path == "/" || r.URL.Path == "/login" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1113,8 +1115,12 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 		requestID = uuid.NewString()
 	}
 	startedAt := time.Now()
+	beginRequest(requestID, r)
+	stage(requestID, "http_start", map[string]any{"stream": r.URL.Query().Get("stream") == "true"})
 	log.Printf("[req-trace] id=%s stage=http_start stream=%t", requestID, r.URL.Query().Get("stream") == "true")
 	defer func() {
+		stage(requestID, "http_return", map[string]any{"total_ms": time.Since(startedAt).Milliseconds()})
+		endRequest(requestID, nil)
 		log.Printf("[req-trace] id=%s stage=http_return total_ms=%d", requestID, time.Since(startedAt).Milliseconds())
 	}()
 	if r.Method != http.MethodPost {
@@ -1150,6 +1156,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 	body.ConversationID = firstNonEmpty(body.ConversationID, body.ConversationIDC)
 	body.SessionID = firstNonEmpty(body.SessionID, body.SessionIDC)
 	log.Printf("[req-trace] id=%s stage=body_parsed messages=%d tools=%d choice=%s raw_bytes=%d", requestID, len(body.Messages), len(body.Tools), normalizedToolChoiceMode(body.ToolChoice), len(raw))
+	stage(requestID, "body_parsed", map[string]any{"messages": len(body.Messages), "tools": len(body.Tools), "raw_bytes": len(raw)})
 	if err := validateToolConversation(body.Messages); err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "tool_protocol_error", err.Error())
 		return
@@ -1161,6 +1168,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(trimmedMessages) != len(body.Messages) {
 		log.Printf("[req-trace] id=%s stage=context_trim messages=%d->%d budget=%d", requestID, len(body.Messages), len(trimmedMessages), configuredContextBudget())
+		stage(requestID, "context_trim", map[string]any{"messages_before": len(body.Messages), "messages_after": len(trimmedMessages), "budget": configuredContextBudget()})
 		body.Messages = trimmedMessages
 	}
 	// Rebuild a protocol-neutral evidence ledger from actual tool calls/results.

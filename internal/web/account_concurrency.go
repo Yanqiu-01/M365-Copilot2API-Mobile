@@ -117,6 +117,11 @@ func (s *Server) recordUpstreamCooldown(accountID string, err error) {
 }
 
 func (s *Server) chatWithAccount(ctx context.Context, accountID string, account chathub.Account, request chathub.Request) (chathub.Result, error) {
+	globalRelease, err := acquireChatSlotOrError(ctx)
+	if err != nil {
+		return chathub.Result{}, err
+	}
+	defer globalRelease()
 	release, err := s.accountConcurrency.Acquire(ctx, accountID)
 	if err != nil {
 		return chathub.Result{}, err
@@ -128,6 +133,11 @@ func (s *Server) chatWithAccount(ctx context.Context, accountID string, account 
 }
 
 func (s *Server) chatWithAccountEvents(ctx context.Context, accountID string, account chathub.Account, request chathub.Request, onEvent func(chathub.StreamEvent) error) (chathub.Result, error) {
+	globalRelease, err := acquireChatSlotOrError(ctx)
+	if err != nil {
+		return chathub.Result{}, err
+	}
+	defer globalRelease()
 	release, err := s.accountConcurrency.Acquire(ctx, accountID)
 	if err != nil {
 		return chathub.Result{}, err
@@ -139,6 +149,11 @@ func (s *Server) chatWithAccountEvents(ctx context.Context, accountID string, ac
 }
 
 func (s *Server) chatWithAccountReasoning(ctx context.Context, accountID string, account chathub.Account, request chathub.Request, onDelta, onReasoning func(string) error) (chathub.Result, error) {
+	globalRelease, err := acquireChatSlotOrError(ctx)
+	if err != nil {
+		return chathub.Result{}, err
+	}
+	defer globalRelease()
 	release, err := s.accountConcurrency.Acquire(ctx, accountID)
 	if err != nil {
 		return chathub.Result{}, err
