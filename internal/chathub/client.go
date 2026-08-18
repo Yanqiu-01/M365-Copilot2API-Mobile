@@ -123,9 +123,10 @@ type Client struct {
 }
 
 func NewClient() *Client {
+	identity := identityFor()
 	h := make(http.Header)
 	h.Set("Origin", "https://m365.cloud.microsoft")
-	h.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0")
+	h.Set("User-Agent", identity.UserAgent)
 	d := outbound.WebSocketDialer()
 	return &Client{
 		HTTPHeader: h,
@@ -523,6 +524,7 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 }
 
 func buildWSURL(acc Account, sessionID, conversationID, requestID string) (string, error) {
+	identity := identityFor()
 	q := url.Values{}
 	q.Set("chatsessionid", requestID)
 	q.Set("clientrequestid", requestID)
@@ -530,9 +532,9 @@ func buildWSURL(acc Account, sessionID, conversationID, requestID string) (strin
 	q.Set("ConversationId", conversationID)
 	q.Set("access_token", acc.AccessToken)
 	q.Set("variants", variants)
-	// source must keep quotes like the browser probe
-	q.Set("source", `"officeweb"`)
-	q.Set("product", "Office")
+	// source must keep quotes like the browser probe.
+	q.Set("source", fmt.Sprintf(`"%s"`, identity.Source))
+	q.Set("product", identity.ProductThread)
 	q.Set("agentHost", "Bizchat.FullScreen")
 	q.Set("licenseType", "Starter")
 	q.Set("agent", "web")
@@ -675,6 +677,7 @@ func (c *Client) uploadAttachments(ctx context.Context, acc Account, conversatio
 }
 
 func chatPayload(text, sessionID, conversationID, requestID, tone string, firstTurn bool, attachments []Attachment, tools []Tool, toolChoice any, mcpServerURL string) string {
+	identity := identityFor()
 	text = toolProtocolPrompt(text, tools, toolChoice, len(clientPlugins(tools, mcpServerURL)) > 0)
 	message := map[string]any{
 		"author":                "user",
@@ -755,10 +758,13 @@ func chatPayload(text, sessionID, conversationID, requestID, tone string, firstT
 		"enable_batch_token_processing",
 		"enable_gg_gpt",
 	}
+	for _, option := range identity.ExtraOptions {
+		optionsSets = append(optionsSets, option)
+	}
 	chat := map[string]any{
 		"arguments": []any{
 			map[string]any{
-				"source":              "officeweb",
+				"source":              identity.Source,
 				"clientCorrelationId": uuid.NewString(),
 				"sessionId":           sessionID,
 				"optionsSets":         optionsSets,
@@ -771,10 +777,10 @@ func chatPayload(text, sessionID, conversationID, requestID, tone string, firstT
 				"conversationId":    conversationID,
 				"traceId":           uuid.NewString(),
 				"isStartOfSession":  firstTurn,
-				"productThreadType": "Office",
+				"productThreadType": identity.ProductThread,
 				"clientInfo": map[string]any{
-					"clientPlatform": "mcmcopilot-web",
-					"clientAppName":  "Office",
+					"clientPlatform": identity.ClientPlatform,
+					"clientAppName":  identity.ClientAppName,
 				},
 				"tone":          tone,
 				"streamingMode": "ConciseWithPadding",
