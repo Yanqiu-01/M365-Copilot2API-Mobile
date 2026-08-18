@@ -56,3 +56,71 @@ func TestGradeRouteRejectsMalformedArtifact(t *testing.T) {
 		t.Fatalf("passed=%d total=%d failures=%v", passed, total, failures)
 	}
 }
+
+func inventoryFixedSource() string {
+	return `class StockError(Exception):
+    pass
+
+class Inventory:
+    """Warehouse stock. CONTRACT: preserve this behavior."""
+    def __init__(self):
+        self.on_hand = {}
+        self.reserved = {}
+        self.trail = []
+    def add(self, sku, qty):
+        if not isinstance(qty, int) or qty < 1:
+            raise ValueError("qty")
+        self.on_hand[sku] = self.on_hand.get(sku, 0) + qty
+    def reserve(self, sku, qty):
+        if sku not in self.on_hand:
+            raise KeyError(sku)
+        if qty <= 0:
+            raise ValueError("qty")
+        available = self.on_hand.get(sku, 0) - self.reserved.get(sku, 0)
+        if qty > available:
+            raise StockError("insufficient")
+        self.reserved[sku] = self.reserved.get(sku, 0) + qty
+        self.trail.append(("reserve", sku, qty))
+    def release(self, sku, qty):
+        result = self.reserved.get(sku, 0) - qty
+        if result < 0:
+            result = 0
+        self.reserved[sku] = result
+    def available(self, sku):
+        return max(0, self.on_hand.get(sku, 0) - self.reserved.get(sku, 0))
+`
+}
+
+func TestGradeInventoryAPKExpectedOutput(t *testing.T) {
+	passed, total, failures := gradeInventory(map[string]string{"inventory.py": inventoryFixedSource()})
+	if passed != total || total != 7 || len(failures) != 0 {
+		t.Fatalf("passed=%d total=%d failures=%v", passed, total, failures)
+	}
+}
+
+func TestGradeInventoryDetectsOriginalDefects(t *testing.T) {
+	source := `class StockError(Exception): pass
+class Inventory:
+    """CONTRACT"""
+    def add(self, sku, qty):
+        if qty < 0: raise ValueError()
+    def reserve(self, sku, qty):
+        self.trail.append(("reserve", sku, qty))
+        if qty > self.on_hand.get(sku, 0): raise StockError()
+    def release(self, sku, qty):
+        self.reserved[sku] = self.reserved.get(sku, 0) - qty
+    def available(self, sku):
+        return self.on_hand.get(sku, 0) - self.reserved.get(sku, 0)
+`
+	passed, total, failures := gradeInventory(map[string]string{"inventory.py": source})
+	if passed != 2 || total != 7 || len(failures) != 5 {
+		t.Fatalf("passed=%d total=%d failures=%v", passed, total, failures)
+	}
+}
+
+func TestGradeInventoryMissingFile(t *testing.T) {
+	passed, total, failures := gradeInventory(map[string]string{})
+	if passed != 0 || total != 7 || len(failures) != 1 {
+		t.Fatalf("passed=%d total=%d failures=%v", passed, total, failures)
+	}
+}

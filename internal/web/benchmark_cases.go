@@ -280,3 +280,137 @@ func gradeRoute(files map[string]string) (int, int, []string) {
 	}
 	return report.tally()
 }
+
+// gradeInventory verifies the APK inventory.py source task. The APK grader
+// awards one point for the file/contract identity and one for each of the five
+// explicitly described defects. It uses source order for the trail check so a
+// superficial presence check cannot pass the original bug.
+func gradeInventory(files map[string]string) (int, int, []string) {
+	report := &gradeReport{}
+	source, ok := files["inventory.py"]
+	if !ok {
+		report.total = 7
+		report.failures = append(report.failures, "inventory.py 不存在")
+		return report.tally()
+	}
+
+	// The task requires preserving both the class and exception names. The APK
+	// keeps the original docstring as a separate check and explicitly looks for
+	// the original CONTRACT marker.
+	report.total++
+	if strings.Contains(source, "class Inventory") && strings.Contains(source, "class StockError") {
+		report.passed++
+	} else {
+		report.failures = append(report.failures, "类名与异常名保留")
+	}
+	report.total++
+	if strings.Contains(source, "CONTRACT") {
+		report.passed++
+	} else {
+		report.failures = append(report.failures, "缺少 CONTRACT")
+	}
+
+	addBody := functionBody(source, "def add")
+	reserveBody := functionBody(source, "def reserve")
+	releaseBody := functionBody(source, "def release")
+	availableBody := functionBody(source, "def available")
+
+	// Defect 1: the lower-bound guard must reject zero. The original source had
+	// `qty < 0`; accept the APK-observed repaired forms.
+	report.total++
+	if containsAny(addBody, "qty < 1", "qty <= 0", "not isinstance(qty, int) or qty < 1") {
+		report.passed++
+	} else {
+		report.failures = append(report.failures, "缺陷1 add 拒绝 qty=0")
+	}
+
+	// Defect 2: failed reserve must not append to trail. If an append remains,
+	// all validation must precede it.
+	report.total++
+	appendAt := strings.Index(reserveBody, "self.trail.append")
+	validationAt := firstIndex(reserveBody, "if qty", "if available", "if self.available", "raise StockError", "raise KeyError")
+	if appendAt < 0 || (validationAt >= 0 && validationAt < appendAt) {
+		report.passed++
+	} else {
+		report.failures = append(report.failures, "缺陷2 失败操作不写入 trail")
+	}
+
+	// Defect 3: unknown SKUs must raise KeyError.
+	report.total++
+	if strings.Contains(reserveBody, "KeyError") {
+		report.passed++
+	} else {
+		report.failures = append(report.failures, "未见 KeyError")
+	}
+
+	// Defect 4: reservation must compare against available stock, not merely
+	// on_hand. The exact available expression is present in the APK strings.
+	report.total++
+	if containsAny(reserveBody, "available(", "available =", "self.available", "on_hand.get(sku, 0) - self.reserved.get(sku, 0)", "self.on_hand.get(sku, 0) - self.reserved.get(sku, 0)") && strings.Contains(reserveBody, "reserved") {
+		report.passed++
+	} else {
+		report.failures = append(report.failures, "预留未依据可用量")
+	}
+
+	// Defect 5: release must clamp or otherwise guard the lower bound.
+	report.total++
+	if containsAny(releaseBody, "max(0", "if result < 0", "if self.reserved", "reserved = 0", "reserved = max") || containsAny(availableBody, "max(0", "if result < 0") {
+		report.passed++
+	} else {
+		report.failures = append(report.failures, "缺陷5 release 后 reserved 可能为负")
+	}
+
+	return report.tally()
+}
+
+func containsAny(value string, needles ...string) bool {
+	for _, needle := range needles {
+		if strings.Contains(value, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func firstIndex(value string, needles ...string) int {
+	result := -1
+	for _, needle := range needles {
+		if index := strings.Index(value, needle); index >= 0 && (result < 0 || index < result) {
+			result = index
+		}
+	}
+	return result
+}
+
+// functionBody extracts a Python def body by indentation. It is deliberately
+// lexical: the APK implementation also uses string searches rather than
+// executing the submitted Python in the gateway process.
+func functionBody(source, signature string) string {
+	start := strings.Index(source, signature)
+	if start < 0 {
+		return ""
+	}
+	lineStart := strings.LastIndexByte(source[:start], '\n') + 1
+	lineEndRel := strings.IndexByte(source[start:], '\n')
+	if lineEndRel < 0 {
+		return ""
+	}
+	defLine := source[lineStart : start+lineEndRel]
+	defIndent := len(defLine) - len(strings.TrimLeft(defLine, " \t"))
+	lineEnd := start + lineEndRel
+	var body strings.Builder
+	for _, line := range strings.Split(source[lineEnd+1:], "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			body.WriteByte('\n')
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		if indent <= defIndent && !strings.HasPrefix(trimmed, "#") {
+			break
+		}
+		body.WriteString(line)
+		body.WriteByte('\n')
+	}
+	return body.String()
+}
