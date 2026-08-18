@@ -13,6 +13,7 @@ import (
 	"log"
 	"m365-copilot2api/internal/auth"
 	"m365-copilot2api/internal/chathub"
+	"m365-copilot2api/internal/mcp"
 	"net"
 	"net/http"
 	"os"
@@ -208,6 +209,10 @@ func (s *Server) Routes() http.Handler {
 	m.HandleFunc("/api/stats/reset", s.handleCacheStatsReset)
 	m.HandleFunc("/api/usage", s.adminUsage)
 	m.HandleFunc("/api/usage/logs", s.adminUsageLogs)
+	m.HandleFunc("/v1/mcp", mcp.HandleStreamable)
+	m.HandleFunc("/v1/mcp/sse", mcp.HandleSSE)
+	m.HandleFunc("/v1/mcp/message", mcp.HandleMessage)
+	m.HandleFunc("/v1/mcp/tools", mcp.HandleToolsList)
 	m.HandleFunc("/v1/models", s.openaiModels)
 	m.HandleFunc("/v1/chat/completions", s.openaiChat)
 	m.HandleFunc("/v1/responses", s.responses)
