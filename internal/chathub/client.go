@@ -115,11 +115,11 @@ type Result struct {
 }
 
 type Client struct {
-	HTTPHeader  http.Header
-	HTTPClient  *http.Client
-	Dialer      *websocket.Dialer
-	Preheater   *Preheater
-	Trace       func(map[string]any)
+	HTTPHeader http.Header
+	HTTPClient *http.Client
+	Dialer     *websocket.Dialer
+	Preheater  *Preheater
+	Trace      func(map[string]any)
 }
 
 func NewClient() *Client {
@@ -464,12 +464,12 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 					}
 					if res, ok := item["result"].(map[string]any); ok {
 						rawResult, _ = res["value"].(string)
-				if msg, ok := res["message"].(string); ok {
-						final = msg
-						if rateLimited(final) {
-							return Result{}, ErrRateLimitNotice
+						if msg, ok := res["message"].(string); ok {
+							final = msg
+							if rateLimited(final) {
+								return Result{}, ErrRateLimitNotice
+							}
 						}
-					}
 					}
 				}
 				// completion frame often follows; keep reading a bit but we already have content
@@ -494,9 +494,15 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 				if text == "" {
 					return Result{}, ErrEmptyCompletion
 				}
+				reasoning := reasoningBuf.String()
+				// APK fallback: some SignalR routes do not surface a live
+				// Chain-of-Thought event, but retain it in raw update frames.
+				if reasoning == "" {
+					reasoning = reasoningFromFrames(events)
+				}
 				return Result{
 					Text:           text,
-					Reasoning:      reasoningBuf.String(),
+					Reasoning:      reasoning,
 					ConversationID: req.ConversationID,
 					SessionID:      req.SessionID,
 					RequestID:      requestID,
