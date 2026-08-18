@@ -272,6 +272,9 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 	}
 	log.Printf("chathub timing handshake_ms=%d", time.Since(dialStarted).Milliseconds())
 	payloadSentAt := time.Now()
+	// APK wire_capture.go records the sanitized outbound chat payload before it
+	// is written to the SignalR socket.
+	recordWire("chat_send", wsURL, payload)
 	if err := conn.WriteMessage(websocket.TextMessage, []byte(payload)); err != nil {
 		return Result{}, fmt.Errorf("chat send: %w", err)
 	}

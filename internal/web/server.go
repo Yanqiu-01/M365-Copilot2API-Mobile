@@ -115,6 +115,10 @@ func New() (*Server, error) {
 			sessionTTL = d
 		}
 	}
+	settings := openSettingsStore()
+	configured := settings.get()
+	chathub.SetClientProfile(configured.ClientProfile)
+	chathub.EnableWireCapture(configured.CaptureRouterFrames)
 	return &Server{
 		tokens:             store,
 		accountPool:        newAccountHealth(),
@@ -135,7 +139,7 @@ func New() (*Server, error) {
 		loginAttempts:       map[string]loginAttempt{},
 		apiKeys:             openAPIKeys(),
 		debug:               openDebugStore(),
-		settings:            openSettingsStore(),
+		settings:            settings,
 		responseMessages:    map[string]map[string]respHistory{},
 		usage:               openUsageLog(),
 		generatedImages:     map[string]generatedImage{},
@@ -176,6 +180,8 @@ func (s *Server) Routes() http.Handler {
 	m.HandleFunc("/api/admin/deployment/check", s.deploymentCheck)
 	m.HandleFunc("/api/admin/debug/logs", s.debugList)
 	m.HandleFunc("/api/admin/debug/detail", s.debugDetail)
+	m.HandleFunc("/api/admin/debug/wire", s.handleWireFrames)
+	m.HandleFunc("/api/admin/debug/wire/toggle", s.handleWireFramesToggle)
 	m.HandleFunc("/api/health", s.health)
 	m.HandleFunc("/api/version", s.version)
 	m.HandleFunc("/api/update", s.update)
@@ -1481,7 +1487,13 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if len(calls) > 0 {
-			log.Printf("[req-trace] id=%s stage=tool_calls_detected count=%d names=%v", requestID, len(calls), func() []string { var n []string; for _, c := range calls { n = append(n, c.Name) }; return n }())
+			log.Printf("[req-trace] id=%s stage=tool_calls_detected count=%d names=%v", requestID, len(calls), func() []string {
+				var n []string
+				for _, c := range calls {
+					n = append(n, c.Name)
+				}
+				return n
+			}())
 			calls = limitToolCalls(calls, adaptiveToolCallLimit(calls, configuredToolCallLimit(s.settings)))
 			_ = writeToolResponse(w, id, model, true, calls, toolResult)
 			if body.User != "" && res.ConversationID != "" {

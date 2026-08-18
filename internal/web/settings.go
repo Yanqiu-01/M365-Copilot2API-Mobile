@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"m365-copilot2api/internal/chathub"
 	"m365-copilot2api/internal/outbound"
 )
 
@@ -62,6 +63,8 @@ type runtimeSettings struct {
 	Scope               string         `json:"scope"`
 	ModelMappings       []modelMapping `json:"modelMappings"`
 	ToolPlanningMode    string         `json:"toolPlanningMode"`
+	CaptureRouterFrames bool           `json:"captureRouterFrames"`
+	ClientProfile       string         `json:"clientProfile"`
 }
 
 type settingsStore struct {
@@ -110,6 +113,7 @@ var openSettingsStore = sync.OnceValue(func() *settingsStore {
 	}
 	return s
 })
+
 func firstNonEmptySetting(values ...string) string {
 	for _, v := range values {
 		if strings.TrimSpace(v) != "" {
@@ -225,6 +229,8 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 			writeOpenAIError(w, 400, "invalid_request_error", e.Error())
 			return
 		}
+		chathub.SetClientProfile(v.ClientProfile)
+		chathub.EnableWireCapture(v.CaptureRouterFrames)
 		jsonOut(w, map[string]any{"ok": true, "settings": v})
 	default:
 		writeOpenAIError(w, 405, "invalid_request_error", "method not allowed")
