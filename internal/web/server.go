@@ -183,6 +183,8 @@ func (s *Server) Routes() http.Handler {
 	m.HandleFunc("/api/admin/debug/detail", s.debugDetail)
 	m.HandleFunc("/api/admin/debug/wire", s.handleWireFrames)
 	m.HandleFunc("/api/admin/debug/wire/toggle", s.handleWireFramesToggle)
+	m.HandleFunc("/api/admin/debug/router-frames", s.handleRouterFrames)
+	m.HandleFunc("/api/admin/debug/router-frames/toggle", s.handleRouterFramesToggle)
 	m.HandleFunc("/api/health", s.health)
 	m.HandleFunc("/api/version", s.version)
 	m.HandleFunc("/api/update", s.update)
@@ -1256,6 +1258,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 		routePrompt := modelToolRouterPrompt(answerPrompt+"\n"+ledger.RouterContext(), toolMaps, body.ToolChoice)
 		log.Printf("[req-trace] id=%s stage=router_start prompt_len=%d", requestID, len(routePrompt))
 		routeRes, routeErr := s.chatWithAccount(ctx, acc.ID, account, chathub.Request{Text: routePrompt, Tone: tone, Attachments: body.Attachments})
+		recordRouterFrames(requestID, "stream-router", routePrompt, routeRes.Text, routeErr)
 		log.Printf("[req-trace] id=%s stage=router_return elapsed_ms=%d err=%t", requestID, time.Since(startedAt).Milliseconds(), routeErr != nil)
 		// Router turns run in a throwaway cloud conversation that is never
 		// reused by the answer turn; delete it so the conversation list does
@@ -1550,6 +1553,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.accountPool.MarkSuccess(acc.ID)
+			recordRouterFrames(requestID, "router", routePrompt, routeRes.Text, nil)
 		}
 		calls, parsed := parseModelToolDecision(routeRes.Text, toolMaps, body.ToolChoice)
 		if !parsed {
@@ -1825,6 +1829,7 @@ APPLICATION_REQUEST_AND_EVIDENCE:
 	if (planningMode == "native" || invalidDetectedTool) && len(toolMaps) > 0 && fmt.Sprint(body.ToolChoice) != "none" {
 		routePrompt := modelToolRouterPrompt(prompt+"\n"+ledger.RouterContext(), toolMaps, body.ToolChoice)
 		routeRes, routeErr := s.chatWithAccount(ctx, acc.ID, account, chathub.Request{Text: routePrompt, Tone: tone, Attachments: body.Attachments})
+		recordRouterFrames(requestID, "native-recovery", routePrompt, routeRes.Text, routeErr)
 		if routeErr == nil {
 			calls, parsed := parseModelToolDecision(routeRes.Text, toolMaps, body.ToolChoice)
 			if !parsed {
