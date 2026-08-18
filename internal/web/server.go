@@ -1150,6 +1150,15 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "tool_protocol_error", err.Error())
 		return
 	}
+	trimmedMessages, trimErr := trimMessagesToContext(body.Messages, body.Tools, body.ToolChoice, body.Model)
+	if trimErr != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "context_length_exceeded", trimErr.Error())
+		return
+	}
+	if len(trimmedMessages) != len(body.Messages) {
+		log.Printf("[req-trace] id=%s stage=context_trim messages=%d->%d budget=%d", requestID, len(body.Messages), len(trimmedMessages), configuredContextBudget())
+		body.Messages = trimmedMessages
+	}
 	// Rebuild a protocol-neutral evidence ledger from actual tool calls/results.
 	// Round limits apply only to the current user turn; full history still informs evidence.
 	ledger := buildAgentLedger(body.Messages)
