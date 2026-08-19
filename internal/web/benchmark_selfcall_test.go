@@ -22,9 +22,11 @@ func selfCallServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("M365_USAGE_LOG", filepath.Join(dir, "usage.json"))
 	s := benchmarkHTTPServer()
 	s.tokens = store
 	s.sessionResolver = openSessionResolver()
+	s.usage = openUsageLog()
 	return s
 }
 

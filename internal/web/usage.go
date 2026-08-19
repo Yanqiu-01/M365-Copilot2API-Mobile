@@ -271,3 +271,10 @@ type usageTrendPoint struct {
 	Requests int64  `json:"requests"`
 	Tokens   int64  `json:"tokens"`
 }
+
+// snapshotRecords 返回当前记录的副本，供测试断言。
+func (s *usageLog) snapshotRecords() []UsageRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]UsageRecord(nil), s.records...)
+}

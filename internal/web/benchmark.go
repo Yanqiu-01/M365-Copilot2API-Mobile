@@ -234,6 +234,125 @@ func (w *benchWorkspace) setTest(fn func(map[string]string) bool) {
 	w.mu.Unlock()
 }
 
+// recordBenchUsage 把一次评测调用记入用量日志。它被 benchChat 以 defer
+// 方式调用，因此即使请求失败也会留下记录。
+//
+// APK 证据（tools/apktool，benchmark.go:421-499，1968 字节）：
+//   - 调用图：contentToString / json.Unmarshal / resolveAccount /
+//     time.Now / (*usageLog).record / fmt.Sprint / toolArgumentsJSON；
+//   - map 键（长度由 ORR 立即数解出）：
+//     "choices"(7) / "content"(7) / "reasoning_content"(17) /
+//     "tool_calls"(10) / "arguments"(9)；
+//   - +0x0384 MOVZ #502 与 +0x0390 MOVZ #200 经 CSEL 选择：
+//     出错记 502，否则记 200；
+//   - 输出侧统计把 content、reasoning_content 与各 tool_call 的
+//     arguments 长度累加（+0x0128 的 ADD 累加链）。
+func (s *Server) recordBenchUsage(model, effort string, response map[string]any, elapsed time.Duration, callErr error) {
+	status := http.StatusOK
+	if callErr != nil {
+		status = http.StatusBadGateway
+	}
+	outputChars := 0
+	if choices, ok := response["choices"].([]any); ok {
+		for _, entry := range choices {
+			choice, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			message, ok := choice["message"].(map[string]any)
+			if !ok {
+				continue
+			}
+			outputChars += len(contentToString(message["content"]))
+			if reasoning, ok := message["reasoning_content"].(string); ok {
+				outputChars += len(reasoning)
+			}
+			calls, ok := message["tool_calls"].([]any)
+			if !ok {
+				continue
+			}
+			for _, raw := range calls {
+				call, ok := raw.(map[string]any)
+				if !ok {
+					continue
+				}
+				outputChars += len(toolArgumentsJSON(call))
+			}
+		}
+	}
+	email := ""
+	if account, err := s.resolveAccount(""); err == nil {
+		email = account.Email
+	}
+	if s.usage == nil {
+		return
+	}
+	s.usage.record(UsageRecord{
+		Time:         time.Now().UTC(),
+		AccountEmail: email,
+		Model:        model,
+		Endpoint:     "benchmark",
+		InputTokens:  0,
+		OutputTokens: int64(outputChars / 4),
+		DurationMs:   elapsed.Milliseconds(),
+		Status:       status,
+	})
+}
+
+// benchChat 在 callOwnChatCompletions 之上包一层评测专用的请求构造与
+// 响应解析：装配 OpenAI 兼容 payload、发起进程内自调用、把响应解析为
+// 通用 map，并在 defer 中记账。
+//
+// APK 证据（tools/apktool，benchmark.go:378-410，1600 字节）：
+//   - 调用图：benchToolSchema / json.Marshal / time.Now /
+//     callOwnChatCompletions / time.Since / json.Unmarshal /
+//     fmt.Sprint / compactToolResult / fmt.Errorf；
+//     func1 闭包（396-398 行）内调用 recordBenchUsage；
+//   - payload 键（长度由 ORR 立即数解出）：
+//     "model"(5) / "stream"(6)=false / "messages"(8) / "tools"(5) /
+//     "reasoning_effort"(16)，其中 effort 前有 CBZ 保护，空值不写入；
+//   - +0x0274 MOVZ+MOVK 组出超时 240000000000 ns，即 4 分钟；
+//   - +0x03b4 取响应中的 "error"(5) 键，非空时经 fmt.Sprint 转字符串、
+//     compactToolResult 截断到 300 字节（+0x03e8 MOVZ #300），
+//     再由 fmt.Errorf("%s") 包装；
+//   - +0x0508 另有 "HTTP %d: %s" 用于非 2xx 状态；
+//   - 返回 (map[string]any, 耗时, error)：runBenchTask +0x0444 之后
+//     以 CBNZ x2 判错、对 x0 做 mapaccess1_faststr。
+func (s *Server) benchChat(ctx context.Context, model, effort string, messages []map[string]any) (map[string]any, time.Duration, error) {
+	payload := map[string]any{"model": model, "stream": false, "messages": messages, "tools": benchToolSchema()}
+	if effort != "" {
+		payload["reasoning_effort"] = effort
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, 0, err
+	}
+	var parsed map[string]any
+	var elapsed time.Duration
+	var callErr error
+	defer func() {
+		s.recordBenchUsage(model, effort, parsed, elapsed, callErr)
+	}()
+	started := time.Now()
+	raw, status, callErr := s.callOwnChatCompletions(ctx, body, 4*time.Minute)
+	elapsed = time.Since(started)
+	if callErr != nil {
+		return nil, elapsed, callErr
+	}
+	if status < 200 || status >= 300 {
+		callErr = fmt.Errorf("HTTP %d: %s", status, compactToolResult(string(raw), 300))
+		return nil, elapsed, callErr
+	}
+	if callErr = json.Unmarshal(raw, &parsed); callErr != nil {
+		return nil, elapsed, callErr
+	}
+	if failure, ok := parsed["error"]; ok && failure != nil {
+		callErr = fmt.Errorf("%s", compactToolResult(fmt.Sprint(failure), 300))
+		return nil, elapsed, callErr
+	}
+	return parsed, elapsed, nil
+}
+
 // callOwnChatCompletions 以进程内自调用方式走一遍 /v1/chat/completions，
 // 使评测复用与外部客户端完全相同的请求路径。
 //

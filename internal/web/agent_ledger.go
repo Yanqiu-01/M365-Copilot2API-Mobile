@@ -55,6 +55,28 @@ func compactToolResult(s string, limit int) string {
 func scopedCallID(name, args string, index int, scope string) string {
 	return "call_" + uuid.NewString()
 }
+
+// toolArgumentsJSON 从一个工具调用对象中取出 arguments 的字符串形式。
+// arguments 已是字符串时原样返回；是结构化对象时序列化为 JSON；
+// 其余类型退回 fmt.Sprint。
+//
+// APK 证据（tools/apktool，agent_ledger.go:81-91，240 字节）：
+// 调用图仅含 encoding/json.Marshal 与 fmt.Sprint，无其它项目内调用。
+func toolArgumentsJSON(call map[string]any) string {
+	function, _ := call["function"].(map[string]any)
+	arguments := function["arguments"]
+	if arguments == nil {
+		return ""
+	}
+	if text, ok := arguments.(string); ok {
+		return text
+	}
+	if encoded, err := json.Marshal(arguments); err == nil {
+		return string(encoded)
+	}
+	return fmt.Sprint(arguments)
+}
+
 func buildAgentLedger(messages []oaiMsg) agentLedger {
 	calls := map[string]toolEvidence{}
 	order := []string{}
@@ -147,6 +169,34 @@ func (l agentLedger) hasCompleted(name, args string) bool {
 	}
 	return false
 }
+
+// toolLooksObservational 判断工具名是否属于只读/观察类。
+//
+// APK 证据（tools/apktool，agent_ledger.go:237-244，192 字节）：
+// TrimSpace + ToLower 后对一个全局字符串切片逐项 strings.Contains。
+// 该切片位于 0x1be6000+2656，实测 22 项，内容与顺序如下。
+func toolLooksObservational(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	for _, word := range []string{"read", "list", "get", "search", "find", "fetch", "inspect", "stat", "status", "describe", "info", "test", "check", "verify", "validate", "browser", "lookup", "diff", "log", "show", "view", "grep"} {
+		if strings.Contains(name, word) {
+			return true
+		}
+	}
+	return false
+}
+
+// shouldSuppressCompletedCall 判定一个已完成过的调用是否应被压制重放：
+// 只读类可以安全跳过，写入类不压制以免丢失副作用。
+//
+// APK 证据（agent_ledger.go:247-251，128 字节）：
+// 依次调用 toolLooksObservational 与 toolLooksMutating。
+func shouldSuppressCompletedCall(name string) bool {
+	if toolLooksObservational(name) {
+		return true
+	}
+	return !toolLooksMutating(strings.ToLower(strings.TrimSpace(name)))
+}
+
 func filterCompletedCalls(calls []detectedToolCall, l agentLedger) []detectedToolCall {
 	out := calls[:0]
 	for _, c := range calls {
