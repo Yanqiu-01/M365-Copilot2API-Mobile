@@ -198,6 +198,61 @@ func contextFingerprint(messages []oaiMsg) string {
 	return hex.EncodeToString(h[:16])
 }
 
+// contextSimilarity 计算两组消息的上下文相似度，用于严格前缀匹配失败后的
+// 弱约束兜底。APK 证据：session_resolver.go:202-215（14 行），函数体内联了
+// strings.Builder 的 WriteString/String，即两侧各拼成一段文本后比较词集合。
+func contextSimilarity(hist, msgs []oaiMsg) float64 {
+	if len(hist) == 0 || len(msgs) == 0 {
+		return 0
+	}
+	var histText, msgText strings.Builder
+	for _, m := range hist {
+		histText.WriteString(m.Role + ":" + contentToString(m.Content) + "\n")
+	}
+	for _, m := range msgs {
+		msgText.WriteString(m.Role + ":" + contentToString(m.Content) + "\n")
+	}
+	return jaccardSimilarity(tokenize(histText.String()), tokenize(msgText.String()))
+}
+
+// jaccardSimilarity 返回两个词集合的 Jaccard 系数 |A∩B| / |A∪B|。
+// APK 证据：session_resolver.go:218-237（20 行），无内联，纯集合运算。
+func jaccardSimilarity(a, b []string) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	setA := make(map[string]bool, len(a))
+	for _, token := range a {
+		setA[token] = true
+	}
+	setB := make(map[string]bool, len(b))
+	for _, token := range b {
+		setB[token] = true
+	}
+	intersection := 0
+	for token := range setA {
+		if setB[token] {
+			intersection++
+		}
+	}
+	union := len(setA) + len(setB) - intersection
+	if union == 0 {
+		return 0
+	}
+	return float64(intersection) / float64(union)
+}
+
+// tokenize 按空白切分并归一化为小写词序列。
+// APK 证据：session_resolver.go:240-246（7 行、176 字节）。
+func tokenize(text string) []string {
+	fields := strings.Fields(strings.ToLower(text))
+	out := make([]string, 0, len(fields))
+	for _, field := range fields {
+		out = append(out, field)
+	}
+	return out
+}
+
 func (sr *sessionResolver) Resolve(r *http.Request, body *oaiReq) ResolveResult {
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
@@ -210,17 +265,17 @@ func (sr *sessionResolver) Resolve(r *http.Request, body *oaiReq) ResolveResult 
 	if explicitID != "" {
 		if sessID, ok := sr.byExplicit[explicitID]; ok {
 			if sess, ok := sr.sessions[sessID]; ok {
-			sess.LastUsedAt = time.Now().UTC()
-			sr.sessions[sessID] = sess
-			sr.persist.markDirty()
-			return ResolveResult{
-				SessionID:      sess.SessionID,
-				ConversationID: sess.ConversationID,
-				AccountID:      sess.AccountID,
-				MatchedBy:      "explicit",
-				IsNew:          false,
-				HistoryLen:     len(sess.ContextHistory),
-			}
+				sess.LastUsedAt = time.Now().UTC()
+				sr.sessions[sessID] = sess
+				sr.persist.markDirty()
+				return ResolveResult{
+					SessionID:      sess.SessionID,
+					ConversationID: sess.ConversationID,
+					AccountID:      sess.AccountID,
+					MatchedBy:      "explicit",
+					IsNew:          false,
+					HistoryLen:     len(sess.ContextHistory),
+				}
 			}
 		}
 		if sess, ok := sr.sessions[explicitID]; ok {
@@ -257,38 +312,39 @@ func (sr *sessionResolver) Resolve(r *http.Request, body *oaiReq) ResolveResult 
 		}
 	}
 
-	// 寮辩害鏉熷厹搴曪細鍐呭涓嶆瀯鎴愪弗鏍煎墠缂€锛屼絾涓庢煇涓巻鍙查珮搴︾浉浼硷紙濡傚鎴风
-	// 鏈湴鎴柇浜嗗巻鍙诧級锛屼粛澶嶇敤璇ヤ細璇濄€傛鏃跺閲忚竟鐣屾湭鐭ワ紝涓婂眰鍙戦€佸叏閲忋€?
-	suffixID, suffixN := sr.matchSuffixLocked(ipFinger, body.Messages)
-	if suffixID != "" {
-		sess := sr.sessions[suffixID]
+	// 弱约束兜底：内容不构成严格前缀，但与某个历史高度相似（如客户端本地
+	// 截断了历史）时仍复用该会话。APK 证据：二进制中存在 context_prefix_ 与
+	// context_similar_ 两个 matchedBy 前缀，不存在 context_suffix_。
+	// 此时增量边界未知，HistoryLen 归零，由上层发送全量。
+	similarID, similarPct := sr.matchSimilarLocked(ipFinger, body.Messages)
+	if similarID != "" {
+		sess := sr.sessions[similarID]
 		sess.LastUsedAt = time.Now().UTC()
-		sr.sessions[suffixID] = sess
+		sr.sessions[similarID] = sess
 		sr.persist.markDirty()
 		return ResolveResult{
 			SessionID:      sess.SessionID,
 			ConversationID: sess.ConversationID,
 			AccountID:      sess.AccountID,
-			MatchedBy:      fmt.Sprintf("context_suffix_%d", suffixN),
+			MatchedBy:      fmt.Sprintf("context_similar_%d", similarPct),
 			IsNew:          false,
-			HistoryLen:     suffixN,
+			HistoryLen:     0,
 		}
 	}
 
 	return ResolveResult{IsNew: true}
 }
 
-func (sr *sessionResolver) matchSuffixLocked(ipFinger string, messages []oaiMsg) (string, int) {
-	if len(messages) < 2 {
+// matchSimilarLocked 在严格前缀匹配失败后按上下文相似度挑选会话。只在同一
+// IP/UA 指纹下比较，并要求相似度超过阈值，避免跨会话误粘。
+func (sr *sessionResolver) matchSimilarLocked(ipFinger string, messages []oaiMsg) (string, int) {
+	if len(messages) == 0 {
 		return "", 0
 	}
-	type match struct {
-		id     string
-		n      int
-		recent time.Time
-	}
-	best := match{}
-	minSuffix := 2
+	const minSimilarity = 0.8
+	bestID := ""
+	bestScore := minSimilarity
+	var bestRecent time.Time
 	for id, sess := range sr.sessions {
 		if time.Since(sess.LastUsedAt) > sr.contextTTL {
 			continue
@@ -296,32 +352,15 @@ func (sr *sessionResolver) matchSuffixLocked(ipFinger string, messages []oaiMsg)
 		if sess.IPFingerprint != ipFinger {
 			continue
 		}
-		hist := sess.ContextHistory
-		if len(hist) < minSuffix {
-			continue
-		}
-		n := suffixMatchLen(hist, messages)
-		if n >= minSuffix && (n > best.n || (n == best.n && sess.LastUsedAt.After(best.recent))) {
-			best = match{id: id, n: n, recent: sess.LastUsedAt}
+		score := contextSimilarity(sess.ContextHistory, messages)
+		if score > bestScore || (score == bestScore && sess.LastUsedAt.After(bestRecent)) {
+			bestID, bestScore, bestRecent = id, score, sess.LastUsedAt
 		}
 	}
-	return best.id, best.n
-}
-
-func suffixMatchLen(hist, msgs []oaiMsg) int {
-	maxN := len(hist)
-	if maxN > len(msgs) {
-		maxN = len(msgs)
+	if bestID == "" {
+		return "", 0
 	}
-	n := 0
-	for i := 1; i <= maxN; i++ {
-		if messagesEqual(hist[len(hist)-i], msgs[len(msgs)-i]) {
-			n = i
-		} else {
-			break
-		}
-	}
-	return n
+	return bestID, int(bestScore * 100)
 }
 
 // matchContextLocked 浠庡叏閮ㄤ細璇濅腑鎵惧埌鍏?contextHistory 涓ユ牸浣滀负娑堟伅鍓嶇紑鐨?
@@ -332,9 +371,9 @@ func (sr *sessionResolver) matchContextLocked(ipFinger string, messages []oaiMsg
 		return "", 0
 	}
 	type match struct {
-		id      string
-		n       int
-		recent  time.Time
+		id     string
+		n      int
+		recent time.Time
 	}
 	best := match{}
 	for id, sess := range sr.sessions {
