@@ -1,97 +1,99 @@
 # M365 网关 v3 修复版
 
-**这个版本包含实际的代码修复**，与 v2（仅改包名）不同。
+这是与原版、v2 可并存安装的 ARM64 Android 改名版，并包含恢复源码中的实际代码修复。
 
-| | 原版 | v2 | v3 |
-|---|---|---|---|
-| 包名 | `com.m365.gateway` | `com.m365.gateway2` | `com.m365.gateway3` |
-| 应用名 | M365 Copilot 网关 | M365 网关 v2 | M365 网关 v3 修复版 |
-| `libm365.so` | 原始 | 原始 | **恢复源码重新编译** |
-| 含代码修复 | — | 否 | **是** |
+## 当前交付版本
 
-三者包名互不相同，可同时安装。
+| 项目 | 值 |
+|---|---|
+| APK | `M365-Gateway-v3-fixed.apk` |
+| 包名 | `com.m365.gateway3` |
+| 应用名 | `M365 网关 v3 修复版` |
+| versionName / versionCode | `2.24.2` / `61` |
+| ABI | `arm64-v8a` |
+| SHA-256 | `28c0cfb1d6a18205eb4fce2eb947a48260284c30dd15f388e73b06ad5ffb9067` |
 
-## 包含的修复
+本次 `2.24.2 / 61` 是对此前 `2.24.1 / 60` v3 的覆盖更新；两者包名和签名相同，可以直接升级。原版 `com.m365.gateway` 与 v2 `com.m365.gateway2` 不受影响。
 
-1. **思考时长显示为 0**（提交 f618502）
-   思考内容此前只在完成帧被一次性补发，客户端看到首末增量几乎同时
-   抵达，时长算成 0。改为逐帧实时推送（新增 `reasoningPump`），
-   取材范围与兜底路径统一。
-   顺带修好一个更广的漏洞：`candidateMessages` 未下钻
-   `arguments[].messages`，而这是最主流的帧形态。
+## 本次 v3 启动修复
 
-2. **评测重复计入用量**（提交 379d4a4）
-   评测经自调用走 `openaiChat`，与 `recordBenchUsage` 各记一次，
-   同一次调用被统计两遍。现由 `X-M365-Internal-Call` 头标记跳过。
+此前改包名后点击 v3 立即闪退，原因是 manifest 中的组件使用相对类名（例如 `.MainActivity`）。Android 会将其解析为 `com.m365.gateway3.MainActivity`，但 DEX 中实际类仍位于 `com.m365.gateway.*`。
 
-3. **首次实现 `M365_DNS`**（提交 7bd0974）
-   Java 侧一直注入该变量但无人消费。现在系统 resolver 不可用时
-   会启用自定义 DNS（默认 223.5.5.5 / 119.29.29.29 / 1.1.1.1 / 8.8.8.8）。
-   这可能改善部分网络环境下的域名解析失败。
+最终版已修正：
 
-4. **首次实现 `M365_PROMPT`** 与 Android 根证书路径探测（同上提交）
+1. manifest 中的 Activity、Service、Receiver、Provider 全部改为 DEX 中真实存在的完整类名 `com.m365.gateway.*`；
+2. `WakeProvider` 的 authority 和 MIME 常量同步为 `com.m365.gateway3.wake`；
+3. 应用内部广播 action 使用 `com.m365.gateway3.*`，避免与原版及 v2 串扰；
+4. 恢复 `lib/arm64-v8a/*.so` 的 ZIP 执行权限（`0700`）。`GatewayService` 使用 `ProcessBuilder` 直接启动 `libm365.so`，权限不能是 apktool 重打包后产生的 `000`。
 
-5. 清除对话详情页虚构链（提交 633cea6）：
-   `/conversation` 页面与 `/api/m365/conversations/detail` 在原版中
-   本就不存在，此前是恢复过程中被误加的。
+## 包含的代码修复
 
-## 二进制兼容性验证
+1. **思考时长显示为 0**（提交 `f618502`）
+   思考内容此前只在完成帧被一次性补发，客户端看到首末增量几乎同时抵达，时长算成 0。现改为逐帧实时推送，取材范围与兜底路径统一，并补充 `candidateMessages` 下钻。
 
-新编译的 `.so` 与原版对照：
+2. **评测重复计入用量**（提交 `379d4a4`）
+   评测自调用经过 `openaiChat` 时不再触发重复的普通聊天记账；内部调用由 `X-M365-Internal-Call` 标记。
 
-```
-Type          DYN (PIE)              一致
-Machine       AArch64                一致
-Entry point   0x86730                完全相同
-INTERP        /system/bin/linker64   一致
-导出符号      1 个（main.main）      一致
-NEEDED        无（静态链接）         一致
-```
+3. **实现 `M365_DNS` 与 `M365_PROMPT`**（提交 `7bd0974`）
+   Android 注入的自定义 DNS、登录 prompt 和根证书路径探测现在由恢复的 Go 代码消费。
 
-原版并非 JNI 库，而是被 `GatewayService` 以 `ProcessBuilder`
-启动的子进程。恢复的 `cmd/server` 正是同一形态，
-用 `GOOS=android GOARCH=arm64 -buildmode=pie` 编译即可直接替换。
+4. **清除对话详情页虚构链**（提交 `633cea6`）
+   删除 APK 中不存在的 `/conversation` 页面和 `/api/m365/conversations/detail` 恢复链路，保留已由真实资源和代码支持的功能。
 
-体积 32.8 MB vs 原版 29.3 MB：原版用了 `-s -w` 裁剪符号表
-（加上后为 29.4 MB，仅差 65 KB）。v3 保留符号表以便日后取证比对。
+## 二进制信息
 
-## 已做的验证
+`libm365.so` 不是 JNI 库，而是由 `GatewayService` 通过 `ProcessBuilder` 启动的 ARM64 PIE 可执行文件：
 
-```
-go build ./...              通过
-go vet ./...                通过
-go test ./...               6 个包全部通过
-android/arm64 pie 交叉编译   通过
-本地冒烟测试                服务正常启动，/ 与 /login 返回 200
-签名                        v2 + v3 方案通过
-libcloudflared.so           未改动
-APK 条目数                  22 → 22，无缺失
+```text
+ELF        64-bit AArch64
+Type       DYN (Position-Independent Executable file)
+INTERP     /system/bin/linker64
+Entry      0x86730
+导出       main.main
+CGO        disabled
 ```
 
-## 未经验证的部分
+它由项目固化的 Go `1.23.12` 交叉编译：
 
-**思考时长的修复只在离线测试中验证过。** 取材逻辑是从既有两条代码
-路径合并推导的，若 ChatHub 还有未覆盖的帧结构，可能仍有遗漏。
-
-请实测确认。若仍显示 0，开启 `M365_DEBUG_LOG` 抓一段
-`[trace:ws] frame_len=...` 日志，可据真实帧结构进一步定位。
-
-**`M365_DNS` 的行为变化需留意。** 此前该变量无效，现在生效了。
-若你所在网络依赖特定 DNS，而系统 `/etc/resolv.conf` 可用，
-代码不会接管；只在系统 resolver 不可用时才启用内置列表。
-
-## 安装
-
-```
-adb install M365-Gateway-v3-fixed.apk
+```text
+GOOS=android GOARCH=arm64 GOARM64=v8.0
+-buildmode=pie
 ```
 
-首次需重新配置账号与 API Key（Android 按包名隔离存储）。
+`libcloudflared.so` 未修改，APK 条目数保持 `22 -> 22`。
+
+## 已完成的验证
+
+- `go test ./...`：全部通过；
+- `go vet ./...`：通过；
+- ARM64 Android PIE 交叉编译：通过；
+- `zipalign`：通过；
+- `apksigner`：APK Signature Scheme v2、v3 通过；
+- `aapt dump badging`：包名、版本、启动 Activity、ABI 与预期一致；
+- manifest 8 个应用组件均能在 DEX/smali 中找到；
+- 两个 native entry 均为未压缩、可执行权限；
+- `libcloudflared.so` 与原 APK 内容一致。
+
+工作区没有 `adb`、Android emulator 或真机，因此**尚未完成真实设备上的点击启动测试**。静态检查已经覆盖本次已定位的闪退原因，但仍请在你的 ARM64 Android 设备上实测。
+
+## 安装与升级
+
+```bash
+adb install -r M365-Gateway-v3-fixed.apk
+```
+
+也可以直接在 Android 文件管理器中打开 APK，并允许安装未知来源应用。若设备上已有此前的 v3（`com.m365.gateway3`），应选择升级安装；如果提示签名冲突，只卸载旧的 `com.m365.gateway3` 后再装（会清除该包的数据），不要卸载原版或 v2。
+
+首次使用需要重新配置账号和 API Key；Android 按包名隔离应用数据。
+
+APK 仅支持 `arm64-v8a`。自签名证书出现“未知来源”提示属于预期行为。
 
 ## 密钥库
 
-`m365-gateway-v2.jks`（v2 与 v3 共用）
-- 别名 `m365v2`，口令 `[REDACTED]`
-- 证书 SHA-256 `8199a4c91043d857ffc88303ab2949639c1337455fd0ffd0891d50d88d27b418`
+v2 与 v3 共用：`m365-gateway-v2.jks`
 
-**请备份。** 后续更新必须用同一密钥，否则无法覆盖安装。
+- 别名：`m365v2`
+- 口令：`[REDACTED]`
+- 证书 SHA-256：`8199a4c91043d857ffc88303ab2949639c1337455fd0ffd0891d50d88d27b418`
+
+请备份密钥库。后续更新必须使用同一密钥，否则无法覆盖安装。

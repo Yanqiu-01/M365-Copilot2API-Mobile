@@ -1,59 +1,151 @@
 #!/usr/bin/env bash
-# 用恢复的源码编译 libm365.so，替换进 APK，产出含修复的 v3。
+# 用恢复的源码编译 libm365.so，替换进 APK，产出含修复且可正常启动的 v3。
 #
 # 关键事实：libm365.so 不是 JNI 库，而是被 GatewayService 以
 # ProcessBuilder 启动的 PIE 可执行文件（只导出 main.main、
 # INTERP=/system/bin/linker64）。恢复的 cmd/server 正是同一形态。
 #
-# 必须用 -buildmode=pie。-buildmode=exe 会报
+# 必须用 -buildmode=pie。-buildmode=exe 会报：
 #   runtime.gcdata: missing Go type information for global symbol .dynsym
+#
+# 这份脚本还固化了两个重打包陷阱：
+#   1. manifest package 改名后，组件不能继续使用相对类名，
+#      因为 dex 中的类仍位于 com.m365.gateway.*；
+#   2. apktool 会把 lib/*.so 的 ZIP 执行权限清成 000，
+#      而 Java 用 ProcessBuilder 直接执行 libm365.so，必须恢复 0700。
 set -euo pipefail
 
 SRC=${1:?用法: build-v3-fixed.sh <原始 base.apk> [输出目录]}
 OUT=${2:-./out-v3}
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 NEW_PKG=com.m365.gateway3
+OLD_PKG=com.m365.gateway
 NEW_LABEL='M365 网关 v3 修复版'
+VERSION_CODE=61
+VERSION_NAME=2.24.2
 KS=${KS:-$OUT/m365-gateway-v2.jks}
 KS_PASS=${KS_PASS:-[REDACTED]}
 KS_ALIAS=${KS_ALIAS:-m365v2}
 
+# go.mod 要求 Go 1.23。优先使用项目固化的 1.23.12，避免系统 Go
+# 触发联网 toolchain 自动下载；也允许调用方通过 GO_BIN 覆盖。
+if [ -z "${GO_BIN:-}" ]; then
+  if [ -x /workspace/toolchain/go1.23/bin/go ]; then
+    GO_BIN=/workspace/toolchain/go1.23/bin/go
+  else
+    GO_BIN=go
+  fi
+fi
+if ! command -v "$GO_BIN" >/dev/null 2>&1 && [ ! -x "$GO_BIN" ]; then
+  echo "找不到 Go 编译器: $GO_BIN" >&2
+  exit 1
+fi
+
 mkdir -p "$OUT"
 
-echo "== 1/5 交叉编译 libm365.so =="
-( cd "$REPO" && CGO_ENABLED=0 GOOS=android GOARCH=arm64 GOARM64=v8.0 \
-    go build -trimpath -buildmode=pie -o "$OUT/libm365.so" ./cmd/server )
-readelf -h "$OUT/libm365.so" | grep -E 'Type|Entry point'
+printf '%s\n' '== 1/6 交叉编译 libm365.so =='
+(
+  cd "$REPO"
+  GOTOOLCHAIN=local GOPROXY=off CGO_ENABLED=0 GOOS=android GOARCH=arm64 GOARM64=v8.0 \
+    "$GO_BIN" build -trimpath -buildmode=pie -o "$OUT/libm365.so" ./cmd/server
+)
+readelf -h "$OUT/libm365.so" | grep -E 'Type|Machine|Entry point'
 readelf -p .interp "$OUT/libm365.so" | grep -oE '/[a-z/0-9._]+'
 
-echo "== 2/5 反编译 APK =="
+printf '%s\n' '== 2/6 反编译 APK =='
 rm -rf "$OUT/work"
 apktool d -f -o "$OUT/work" "$SRC"
 
-echo "== 3/5 替换 .so、同步 web 资源、改包名 =="
+printf '%s\n' '== 3/6 替换 .so、同步 web 资源、改包名与组件 =='
 cp "$OUT/libm365.so" "$OUT/work/lib/arm64-v8a/libm365.so"
 for f in index.html login.html debug.html; do
   [ -f "$REPO/web/$f" ] && cp "$REPO/web/$f" "$OUT/work/assets/web/$f"
 done
 
-cd "$OUT/work"
-sed -i "s|package=\"com\.m365\.gateway\"|package=\"$NEW_PKG\"|" AndroidManifest.xml
-sed -i "s|\"com\.m365\.gateway\.wake\"|\"$NEW_PKG.wake\"|g" AndroidManifest.xml
-sed -i "s|<string name=\"app_name\">[^<]*</string>|<string name=\"app_name\">$NEW_LABEL</string>|" \
-  res/values/strings.xml
-for a in KEEPALIVE START STOP TUNNEL_START; do
-  grep -rl "\"com\.m365\.gateway\.$a\"" smali/ 2>/dev/null | while read -r f; do
-    sed -i "s|\"com\.m365\.gateway\.$a\"|\"$NEW_PKG.$a\"|g" "$f"
-  done
-  sed -i "s|\"com\.m365\.gateway\.$a\"|\"$NEW_PKG.$a\"|g" AndroidManifest.xml
-done
-cd - >/dev/null
+python3 - "$OUT/work" "$OLD_PKG" "$NEW_PKG" "$NEW_LABEL" "$VERSION_CODE" "$VERSION_NAME" <<'PY'
+import pathlib, re, sys
+root = pathlib.Path(sys.argv[1])
+old_pkg, new_pkg, label = sys.argv[2:5]
+version_code, version_name = sys.argv[5:7]
 
-echo "== 4/5 打包、对齐、签名 =="
-apktool b "$OUT/work" --use-aapt2 -o "$OUT/unsigned.apk"   # 必须 --use-aapt2
-zipalign -p -f 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
+manifest_path = root / 'AndroidManifest.xml'
+s = manifest_path.read_text(encoding='utf-8')
+s = s.replace(f'package="{old_pkg}"', f'package="{new_pkg}"', 1)
+# Provider authority 是应用私有标识，必须与 provider 内部常量同步。
+s = s.replace(f'"{old_pkg}.wake"', f'"{new_pkg}.wake"')
+# dex 中的组件类仍是 com.m365.gateway.*。改成完整类名，不能让
+# Android 按新 package 把 .MainActivity 解析成不存在的 gateway3.MainActivity。
+for component in ('MainActivity', 'AuthActivity', 'DiagActivity', 'TunnelActivity',
+                  'WakeProvider', 'GatewayService', 'KeepAliveReceiver', 'BootReceiver'):
+    s = s.replace(f'android:name=".{component}"',
+                  f'android:name="{old_pkg}.{component}"')
+# 应用内广播 action 与新包隔离，避免两个版本互相唤醒。
+for action in ('KEEPALIVE', 'START', 'STOP', 'TUNNEL_START'):
+    s = s.replace(f'"{old_pkg}.{action}"', f'"{new_pkg}.{action}"')
+manifest_path.write_text(s, encoding='utf-8')
+
+strings_path = root / 'res/values/strings.xml'
+s = strings_path.read_text(encoding='utf-8')
+s = re.sub(r'<string name="app_name">[^<]*</string>',
+           f'<string name="app_name">{label}</string>', s, count=1)
+strings_path.write_text(s, encoding='utf-8')
+
+yml_path = root / 'apktool.yml'
+s = yml_path.read_text(encoding='utf-8')
+s = re.sub(r"versionCode: '[^']*'", f"versionCode: '{version_code}'", s, count=1)
+s = re.sub(r'versionName: .*', f'versionName: {version_name}', s, count=1)
+yml_path.write_text(s, encoding='utf-8')
+
+# 所有 smali 中的应用私有 action、WakeProvider 的 authority/MIME 常量。
+for path in (root / 'smali').rglob('*.smali'):
+    text = path.read_text(encoding='utf-8')
+    old = text
+    text = text.replace(f'{old_pkg}.KEEPALIVE', f'{new_pkg}.KEEPALIVE')
+    text = text.replace(f'{old_pkg}.START', f'{new_pkg}.START')
+    text = text.replace(f'{old_pkg}.STOP', f'{new_pkg}.STOP')
+    text = text.replace(f'{old_pkg}.TUNNEL_START', f'{new_pkg}.TUNNEL_START')
+    text = text.replace(f'{old_pkg}.wake', f'{new_pkg}.wake')
+    if text != old:
+        path.write_text(text, encoding='utf-8')
+
+# 静态一致性检查：manifest 里的组件必须在 dex/smali 中存在。
+for component in ('MainActivity', 'AuthActivity', 'DiagActivity', 'TunnelActivity',
+                  'WakeProvider', 'GatewayService', 'KeepAliveReceiver', 'BootReceiver'):
+    expected = root / ('smali/' + old_pkg.replace('.', '/') + '/' + component + '.smali')
+    if not expected.exists():
+        raise SystemExit(f'component class missing: {expected}')
+if f'{old_pkg}.KEEPALIVE' in manifest_path.read_text(encoding='utf-8'):
+    raise SystemExit('old private action remains in manifest')
+PY
+
+printf '%s\n' '== 4/6 打包（必须使用 aapt2）=='
+apktool b "$OUT/work" --use-aapt2 -o "$OUT/unsigned.apk"
+
+# apktool 会丢失 native ZIP entry 的执行权限。恢复为原 APK 的 0700，
+# 再交给 zipalign；否则 ProcessBuilder 可能因权限不足启动失败。
+python3 - "$SRC" "$OUT/unsigned.apk" "$OUT/unsigned-mode.apk" <<'PY'
+import os, sys, zipfile
+original, source, target = sys.argv[1:4]
+with zipfile.ZipFile(source, 'r') as zin, zipfile.ZipFile(target, 'w') as zout:
+    for item in zin.infolist():
+        data = zin.read(item.filename)
+        info = zipfile.ZipInfo(item.filename, item.date_time)
+        info.comment = item.comment
+        info.extra = item.extra
+        info.compress_type = item.compress_type
+        info.create_system = item.create_system
+        info.flag_bits = item.flag_bits
+        info.internal_attr = item.internal_attr
+        info.external_attr = item.external_attr
+        if item.filename.startswith('lib/') and item.filename.endswith('.so'):
+            info.create_system = 3
+            info.external_attr = 0o100700 << 16
+        zout.writestr(info, data)
+PY
+zipalign -p -f 4 "$OUT/unsigned-mode.apk" "$OUT/aligned.apk"
 zipalign -c 4 "$OUT/aligned.apk" >/dev/null
 
+printf '%s\n' '== 5/6 签名 =='
 if [ ! -f "$KS" ]; then
   keytool -genkeypair -v -keystore "$KS" -alias "$KS_ALIAS" \
     -keyalg RSA -keysize 4096 -validity 10950 \
@@ -66,17 +158,21 @@ apksigner sign --ks "$KS" --ks-key-alias "$KS_ALIAS" \
   --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
   --out "$OUT/M365-Gateway-v3-fixed.apk" "$OUT/aligned.apk"
 
-echo "== 5/5 验证 =="
+printf '%s\n' '== 6/6 验证 =='
 apksigner verify "$OUT/M365-Gateway-v3-fixed.apk"
-aapt dump badging "$OUT/M365-Gateway-v3-fixed.apk" | grep -E "^package|application-label|native-code"
+aapt dump badging "$OUT/M365-Gateway-v3-fixed.apk" | grep -E '^package|application-label|launchable-activity|native-code'
 python3 - "$SRC" "$OUT/M365-Gateway-v3-fixed.apk" <<'PY'
-import sys,zipfile,hashlib
-o,n=(zipfile.ZipFile(p) for p in sys.argv[1:3])
-f=lambda z,x: hashlib.sha256(z.read(x)).hexdigest()
-so='lib/arm64-v8a/libm365.so'
-print("libm365.so 已替换 :", f(o,so)!=f(n,so))
-cf='lib/arm64-v8a/libcloudflared.so'
-print("libcloudflared 未动:", f(o,cf)==f(n,cf))
-print("条目数            :", len(o.namelist()), "->", len(n.namelist()))
+import hashlib, sys, zipfile
+old, new = (zipfile.ZipFile(p) for p in sys.argv[1:3])
+h = lambda z, n: hashlib.sha256(z.read(n)).hexdigest()
+so = 'lib/arm64-v8a/libm365.so'
+cf = 'lib/arm64-v8a/libcloudflared.so'
+print('libm365.so 已替换 :', h(old, so) != h(new, so))
+print('libcloudflared 未动:', h(old, cf) == h(new, cf))
+for n in (so, cf):
+    i = new.getinfo(n)
+    print(n, 'mode=', oct((i.external_attr >> 16) & 0xffff), 'compress=', i.compress_type)
+print('条目数            :', len(old.namelist()), '->', len(new.namelist()))
 PY
 sha256sum "$OUT/M365-Gateway-v3-fixed.apk" | tee "$OUT/M365-Gateway-v3-fixed.apk.sha256"
+echo "完成：$OUT/M365-Gateway-v3-fixed.apk"
