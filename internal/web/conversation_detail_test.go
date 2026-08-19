@@ -4,16 +4,18 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"m365-copilot2api/internal/auth"
 )
 
-func TestConversationListAndDetailUseCompleteLocalHistory(t *testing.T) {
+// 会话列表把本地 session 历史合并进结果（messageCount 等字段）。
+// 详情页相关断言已移除：handleM365ConversationDetail 与
+// web/conversation.html 在 APK 中均不存在（rodata 无对应字面量、
+// APK rootPage 只判 / 与 /login、conversations.go 行段亦无容身空隙）。
+func TestConversationListUsesCompleteLocalHistory(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("M365_SESSION_CACHE", filepath.Join(dir, "sessions.json"))
 	t.Setenv("M365_CONVERSATION_CACHE", filepath.Join(dir, "conversations.json"))
@@ -51,43 +53,6 @@ func TestConversationListAndDetailUseCompleteLocalHistory(t *testing.T) {
 		t.Fatalf("list response=%s", listRecorder.Body.String())
 	}
 
-	detailRecorder := httptest.NewRecorder()
-	s.handleM365ConversationDetail(detailRecorder, httptest.NewRequest(http.MethodGet, "/api/m365/conversations/detail?id=conversation-detail", nil))
-	if detailRecorder.Code != http.StatusOK {
-		t.Fatalf("detail status=%d body=%s", detailRecorder.Code, detailRecorder.Body.String())
-	}
-	var detail struct {
-		ConversationID string   `json:"conversationId"`
-		Messages       []oaiMsg `json:"messages"`
-	}
-	if err := json.Unmarshal(detailRecorder.Body.Bytes(), &detail); err != nil {
-		t.Fatal(err)
-	}
-	if detail.ConversationID != "conversation-detail" || len(detail.Messages) != 2 {
-		t.Fatalf("detail response=%s", detailRecorder.Body.String())
-	}
-	if detail.Messages[1].ReasoningContent != "complete reasoning" || contentToString(detail.Messages[1].Content) != "complete body" {
-		t.Fatalf("assistant message=%#v", detail.Messages[1])
-	}
-}
-
-func TestConversationDetailPageContainsCompleteViews(t *testing.T) {
-	body, err := os.ReadFile("../../web/conversation.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	page := string(body)
-	for _, needle := range []string{
-		`id="conversationView"`,
-		`id="jsonView"`,
-		"reasoning_content",
-		"tool_calls",
-		"/api/m365/conversations/detail?id=",
-	} {
-		if !strings.Contains(page, needle) {
-			t.Fatalf("conversation page missing %q", needle)
-		}
-	}
 }
 
 func TestConversationTimestampPrefersUpdateTime(t *testing.T) {

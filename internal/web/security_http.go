@@ -19,8 +19,18 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+// rootPage 只提供两个页面：/ 与 /login。
+//
+// APK 证据（tools/apktool，security_http.go:22-45，848 字节）：
+//   - +0x0054 CMP #47 判单字符 '/'，+0x0064 CMP #6 配整数化比较 "/login"；
+//   - +0x00d4 CMP #3 与 +0x00f8 CMP #4 分别判方法 "GET" / "HEAD"；
+//   - rodata 中只存在 "web/index.html"（@0x4d4181），
+//     不存在 "web/conversation.html" 或 "conversation.html"。
+//
+// 此前本地多出的 /conversation 分支属虚构：APK 的 assets/web 仅有
+// index.html / login.html / debug.html 三个文件。
 func (s *Server) rootPage(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" && r.URL.Path != "/login" && r.URL.Path != "/conversation" {
+	if r.URL.Path != "/" && r.URL.Path != "/login" {
 		http.NotFound(w, r)
 		return
 	}
@@ -31,8 +41,6 @@ func (s *Server) rootPage(w http.ResponseWriter, r *http.Request) {
 	name := "web/index.html"
 	if r.URL.Path == "/login" {
 		name = "web/login.html"
-	} else if r.URL.Path == "/conversation" {
-		name = "web/conversation.html"
 	}
 	f, err := os.Open(name)
 	if err != nil {

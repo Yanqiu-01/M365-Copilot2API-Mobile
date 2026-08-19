@@ -178,39 +178,6 @@ func (s *Server) handleM365Conversations(w http.ResponseWriter, r *http.Request)
 	jsonOut(w, response)
 }
 
-func (s *Server) handleM365ConversationDetail(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	conversationID := strings.TrimSpace(r.URL.Query().Get("id"))
-	if conversationID == "" {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "conversation id is required")
-		return
-	}
-	session, found := s.sessionResolver.GetConversation(conversationID)
-	if !found {
-		writeOpenAIError(w, http.StatusNotFound, "conversation_not_found", "conversation history is not available")
-		return
-	}
-	accountEmail := ""
-	if account, ok := s.tokens.Get(session.AccountID); ok {
-		accountEmail = account.Email
-	}
-	jsonOut(w, map[string]any{
-		"object":         "conversation",
-		"conversationId": session.ConversationID,
-		"sessionId":      session.SessionID,
-		"accountId":      session.AccountID,
-		"accountEmail":   accountEmail,
-		"chatName":       conversationTitle(session.ContextHistory),
-		"createdAt":      session.CreatedAt,
-		"updatedAt":      session.LastUsedAt,
-		"messageCount":   len(session.ContextHistory),
-		"messages":       session.ContextHistory,
-	})
-}
-
 func conversationTitle(messages []oaiMsg) string {
 	for _, message := range messages {
 		if message.Role != "user" {
