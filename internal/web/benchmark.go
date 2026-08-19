@@ -246,7 +246,12 @@ func (w *benchWorkspace) setTest(fn func(map[string]string) bool) {
 //   - +0x0384 MOVZ #502 与 +0x0390 MOVZ #200 经 CSEL 选择：
 //     出错记 502，否则记 200；
 //   - 输出侧统计把 content、reasoning_content 与各 tool_call 的
-//     arguments 长度累加（+0x0128 的 ADD 累加链）。
+//     arguments 长度累加（+0x0128 的 ADD 累加链）；
+//   - endpoint 记为 "internal-benchmark"：该串以 18 字节存在于 rodata
+//     0x4ec96a，但全项目机器码中零引用（已穷举 ADRP+ADD 配对确认），
+//     实际来自 assets/web/index.html 的用量分类文案
+//     「评测消耗会记入「用量」，归类为 internal-benchmark」。
+//     前端 t.* 字段集与 benchTaskResult 完全一致，可作为 JSON 契约依据。
 func (s *Server) recordBenchUsage(model, effort string, response map[string]any, elapsed time.Duration, callErr error) {
 	status := http.StatusOK
 	if callErr != nil {
@@ -291,7 +296,7 @@ func (s *Server) recordBenchUsage(model, effort string, response map[string]any,
 		Time:         time.Now().UTC(),
 		AccountEmail: email,
 		Model:        model,
-		Endpoint:     "benchmark",
+		Endpoint:     "internal-benchmark",
 		InputTokens:  0,
 		OutputTokens: int64(outputChars / 4),
 		DurationMs:   elapsed.Milliseconds(),

@@ -93,8 +93,8 @@ func TestBenchChatRecordsUsageOnFailure(t *testing.T) {
 		t.Fatalf("usage records: before=%d after=%d, defer must record exactly once", before, len(after))
 	}
 	rec := after[len(after)-1]
-	if rec.Endpoint != "benchmark" {
-		t.Errorf("endpoint=%q want benchmark", rec.Endpoint)
+	if rec.Endpoint != "internal-benchmark" {
+		t.Errorf("endpoint=%q want internal-benchmark", rec.Endpoint)
 	}
 	if rec.Model != "gpt-5.6-reasoning" {
 		t.Errorf("model=%q", rec.Model)

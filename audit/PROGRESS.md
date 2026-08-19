@@ -109,6 +109,73 @@ MOVZ x1,#<值长>  / STR x1,[x0,#8]                          ← 当前项的值
 `benchTask` 结构体需扩展产物字段（Files / Protected / 评分器挂载），
 须先确认 APK 侧字段布局，再补全 `benchTasks` 的八项任务定义。
 
+## 前端 index.html 是 JSON 契约的权威来源
+
+APK `assets/web/index.html` 引用的 benchmark 字段集与本地
+`benchTaskResult` **完全一致，无一多余**：
+```
+t.id t.title t.detail t.category t.status t.netScore
+t.passed t.floor t.total t.steps t.redundant t.elapsedMs
+t.wroteFiles t.testsPass t.testRuns t.failures t.error
+```
+说明 `benchTask` / `benchTaskResult` **不含产物字段** ——
+产物是 `benchTasks` 内部构造后传给 `newBenchWorkspace` 的局部数据，
+不参与 JSON 序列化。上一轮凭空加 `benchTask.Kind` 即是误判。
+
+前端提示文案还给出三条硬约束（均已由机器码交叉验证）：
+- `每项最多 14 步` → `runBenchTask +0x03fc CMP #14` ✅
+- `编程任务必须在最新代码上通过 run_tests 才计闭环分`
+- `评测消耗会记入「用量」，归类为 internal-benchmark`
+
+### endpoint = "internal-benchmark"（已修正）
+
+该串以 18 字节存在于 rodata `0x4ec96a`，但**全项目机器码零引用**
+（已穷举 ADRP+ADD 配对确认，含放宽寄存器匹配）。
+它是 `index.html` 被 embed 进二进制的一部分。
+`recordBenchUsage` 的 endpoint 由调用方传入（`+0x0040 STR x9,[x31,#864]`），
+`benchChat.func1` 的 13 个 defer 参数全部来自入参与局部变量，无常量地址。
+故以前端文案为准，初版写的 `"benchmark"` 已改正。
+
+## runBenchTask 完整骨架（518-644，6000 字节，无闭包）
+
+字符串证据：
+```
++0x0288 len=267 "\n\n编程闭环要求：修改代码后必须调用 run_tests。若测试失败，
+                 读取失败信息、重新检查相关文件、继续修改并再次运行
+                 run_tests；只有看到 TESTS PASSED 才能结束。
+                 不要用文字声称测试通过来代替实际调用。"
++0x055c len=17  "reasoning_content"
++0x05ac len=10  "tool_calls"
++0x0b38 len=54  "[%s] 第 %d 步提前结束，强制进入测试闭环"
++0x0bd4 len=38  "[%s] 第 %d 步结束回答（%d ms）"
++0x0c08 len=29  "response contained no choices"
++0x0ce4 len=9   "cancelled"
++0x1080 len=44  "[%s] 原始 %d/%d，净得分 %d/%d = %.0f%%"
++0x11d8 len=9   "arguments"
++0x1354 len=20  "workspace_write_file"
+```
+关键立即数：
+```
++0x03fc CMP #14   步数上限（与前端「每项最多 14 步」吻合）
++0x0250 CMP #6    "coding" 长度分派
++0x0f38 CMP #7    "running"
++0x0f6c CMP #103
++0x133c CMP #20   "workspace_write_file"
++0x0844 MOVZ #104
++0x138c MOVZ #400 / +0x13a4 MOVZ #300  截断上限
+```
+整数化字符串比较（MOVZ+MOVK 合成 8 字节）：
+`coding` / `running` / `write`
+
+调用序列（按偏移）：
+```
+time.Now → newBenchWorkspace → benchWorkspace.snapshot →
+gradeBenchTask → benchmarkStore.logf → benchChat →
+compactToolResult → benchWorkspace.testStatus → time.Since →
+toolArgumentsJSON → json.Unmarshal → canonicalToolArguments →
+shouldSuppressCompletedCall → benchWorkspace.execute
+```
+
 ## startBenchmark 已备齐的证据
 
 ```
@@ -125,9 +192,12 @@ func1 666-743 (2688B)  主循环
   +0x0480 CMP #100 / +0x0534 CMP #6 / +0x0454 CMP #9
   调 benchTasks / benchmarkStore.update / runBenchTask /
     benchWeightedAverage / func1.1
-func1.1 667-681 (528B)  每任务状态更新，调 benchmarkStore.update
-func1.2/.3/.5 均单行 (112B)
-func1.4 703-708 (336B)
+func1.1   667-681 (528B)  每任务状态更新，调 benchmarkStore.update
+func1.1.1 669-669 (160B)
+func1.2   692-692 (112B)
+func1.3   696-696 (112B)
+func1.4   703-708 (336B)
+func1.5   710-710 (112B)
 ```
 
 ## agent_ledger.go 进度
