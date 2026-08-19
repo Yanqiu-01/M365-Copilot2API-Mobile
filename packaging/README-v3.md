@@ -9,11 +9,11 @@
 | APK | `M365-Gateway-v3-fixed.apk` |
 | 包名 | `com.m365.gateway3` |
 | 应用名 | `M365 网关 v3 修复版` |
-| versionName / versionCode | `2.24.2` / `61` |
+| versionName / versionCode | `2.24.3` / `62` |
 | ABI | `arm64-v8a` |
-| SHA-256 | `d3a751581f1eba623491422d900d422b3842a95e1a63455ba3b2f724d81f2842` |
+| SHA-256 | `97b20be540c70a1c6226076c7af8c16d8db41349032c710291e8bfeb198f47d1` |
 
-本次 `2.24.2 / 61` 是对此前 `2.24.1 / 60` v3 的覆盖更新；两者包名和签名相同，可以直接升级。原版 `com.m365.gateway` 与 v2 `com.m365.gateway2` 不受影响。
+本次 `2.24.3 / 62` 是对此前 `2.24.2 / 61` v3 的覆盖更新；两者包名和签名相同，可以直接升级。原版 `com.m365.gateway` 与 v2 `com.m365.gateway2` 不受影响。
 
 ## 本次 v3 启动修复
 
@@ -25,6 +25,17 @@
 2. `WakeProvider` 的 authority 和 MIME 常量同步为 `com.m365.gateway3.wake`；
 3. 应用内部广播 action 使用 `com.m365.gateway3.*`，避免与原版及 v2 串扰；
 4. 恢复 `lib/arm64-v8a/*.so` 的 ZIP 执行权限（`0700`）。`GatewayService` 使用 `ProcessBuilder` 直接启动 `libm365.so`，权限不能是 apktool 重打包后产生的 `000`。
+
+## 本次 2.24.3 修复
+
+1. **思考档位对象显示异常**
+   前端现在兼容 `{effort, description}` 形式的 Codex 推理档位，并正确发送 `max`；评测默认优先选择设置中显式配置的模型路由。
+
+2. **模型拒绝不再误报成功**
+   管理页模型探测和非流式聊天会识别上游“抱歉，我无法响应”等短拒绝，返回 `model_unavailable`；模型批量测试改为串行，避免并发探测触发误判的限流。
+
+3. **新增回归测试**
+   覆盖 `max` 档位、默认路由选择、拒绝响应识别和纯函数路径，避免测试污染全局设置。
 
 ## 包含的代码修复
 

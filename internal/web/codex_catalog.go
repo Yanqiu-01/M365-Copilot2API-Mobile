@@ -39,6 +39,10 @@ var advertisedReasoningEfforts = []reasoningEffortPreset{
 	{Effort: "medium", Description: "Balances speed and reasoning depth for everyday tasks."},
 	{Effort: "high", Description: "Greater reasoning depth for complex problems."},
 	{Effort: "xhigh", Description: "Extra high reasoning depth for complex problems."},
+	// MAX is the tier used by the capability benchmark and by clients which
+	// expose a named maximum-reasoning option.  Keep it as a real preset object
+	// (rather than a bare string) so JSON consumers can render its description.
+	{Effort: "max", Description: "Maximum reasoning depth. Clients that expose a MAX tier send this."},
 }
 
 // gatewayCodexBaseInstructions is returned only in the Codex model catalog.
@@ -227,10 +231,10 @@ func normalizeReasoningEffort(e string) (string, error) {
 		return "", nil
 	}
 	switch e {
-	case "none", "minimal", "low", "medium", "high", "xhigh":
+	case "none", "minimal", "low", "medium", "high", "xhigh", "max":
 		return e, nil
 	}
-	return "", fmt.Errorf("unsupported reasoning effort %q; use none, minimal, low, medium, high, or xhigh", e)
+	return "", fmt.Errorf("unsupported reasoning effort %q; use none, minimal, low, medium, high, xhigh, or max", e)
 }
 func reasoningTone(model, effort string) (string, error) {
 	e, err := normalizeReasoningEffort(effort)
@@ -275,7 +279,8 @@ func reasoningTone(model, effort string) (string, error) {
 }
 func modelCatalog() []map[string]any {
 	l := configuredModelLimits()
-	models := configuredModelSpecs(currentSettings().ModelMappings)
+	settings := currentSettings()
+	models := configuredModelSpecs(settings.ModelMappings)
 	out := make([]map[string]any, 0, len(models))
 	for _, m := range models {
 		// Keep capability fields both at the top level and under capabilities:
@@ -299,8 +304,12 @@ func modelCatalog() []map[string]any {
 		if defaultReasoningLevel == "" {
 			defaultReasoningLevel = "medium"
 		}
+		_, configured := configuredModelMapping(m.ID, settings.ModelMappings)
 		out = append(out, map[string]any{
 			"id": m.ID, "slug": m.ID, "display_name": displayName, "description": "Public model endpoint.",
+			// The admin UI uses this to prefer routes that the operator explicitly
+			// configured over the historical compatibility aliases in the catalog.
+			"configured":        configured,
 			"base_instructions": gatewayCodexBaseInstructions, "model_messages": codexModelMessages(),
 			"default_reasoning_level": defaultReasoningLevel, "object": "model", "owned_by": "gateway",
 			"shell_type": "shell_command", "visibility": "list", "supported_in_api": true, "priority": 1,

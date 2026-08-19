@@ -39,6 +39,30 @@ func TestBenchmarkHTTPStatusAndStop(t *testing.T) {
 	}
 }
 
+func TestBenchmarkDefaultModelPrefersConfiguredRoute(t *testing.T) {
+	if got := benchmarkDefaultModel([]modelMapping{
+		{PublicModel: "", UpstreamTone: ""},
+		{PublicModel: " gpt-5.6-sol ", UpstreamTone: "Gpt_5_6_Reasoning"},
+	}); got != "gpt-5.6-sol" {
+		t.Fatalf("configured default=%q", got)
+	}
+	if got := benchmarkDefaultModel(nil); got != "gpt-5.6-reasoning" {
+		t.Fatalf("fallback default=%q", got)
+	}
+}
+
+func TestBenchmarkEffortKeepsMaximumTier(t *testing.T) {
+	for input, want := range map[string]string{"": "max", "max": "max", " XHIGH ": "xhigh"} {
+		got, err := benchmarkEffort(input)
+		if err != nil || got != want {
+			t.Fatalf("benchmarkEffort(%q) = %q, %v; want %q", input, got, err, want)
+		}
+	}
+	if _, err := benchmarkEffort("extreme"); err == nil {
+		t.Fatal("unsupported effort accepted")
+	}
+}
+
 func TestBenchmarkRunValidatesAPKRequestShape(t *testing.T) {
 	// 非法请求一律 400，且不得启动任何评测。
 	for _, body := range []string{

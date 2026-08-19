@@ -1012,6 +1012,11 @@ func (s *Server) adminModelTest(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadGateway, "m365_error", upstreamError(err))
 		return
 	}
+	if isUnavailableModelReply(res.Text) {
+		log.Printf("[model-test] unavailable model=%q tone=%q reply=%q", b.Model, tone, trimForLog(res.Text))
+		writeOpenAIError(w, http.StatusBadGateway, "model_unavailable", "the requested model is not available for this tenant")
+		return
+	}
 	jsonOut(w, map[string]any{"ok": true, "model": b.Model, "reply": sanitizePublicAssistantTextForModel(res.Text, b.Model), "latency_ms": ms})
 }
 
@@ -1707,6 +1712,15 @@ APPLICATION_REQUEST_AND_EVIDENCE:
 	if err != nil {
 		s.accountPool.MarkFailure(acc.ID, err, rateLimitCooldown)
 		writeUpstreamError(w, err)
+		return
+	}
+	// A short generic refusal is ChatHub's successful-transport response for a
+	// tone that this tenant cannot use. Do not turn it into a normal OpenAI
+	// completion (and, in particular, do not let a benchmark score it as an
+	// answer). This is a route/model condition, not an account failure.
+	if !body.Stream && isUnavailableModelReply(res.Text) {
+		log.Printf("[model-route] unavailable model=%q tone=%q reply=%q", body.Model, tone, trimForLog(res.Text))
+		writeOpenAIError(w, http.StatusBadGateway, "model_unavailable", "the requested model is not available for this tenant")
 		return
 	}
 	s.accountPool.MarkSuccess(acc.ID)

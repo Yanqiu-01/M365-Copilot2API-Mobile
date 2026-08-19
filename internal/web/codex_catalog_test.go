@@ -170,6 +170,21 @@ func TestConfiguredModelMappingsDriveCatalogAndRouting(t *testing.T) {
 	}
 }
 
+func TestModelCatalogIncludesMaxReasoningPreset(t *testing.T) {
+	for _, model := range modelCatalog() {
+		levels, ok := model["supported_reasoning_levels"].([]reasoningEffortPreset)
+		if !ok {
+			t.Fatalf("reasoning levels have unexpected type: %T", model["supported_reasoning_levels"])
+		}
+		for _, level := range levels {
+			if level.Effort == "max" && level.Description != "" {
+				return
+			}
+		}
+	}
+	t.Fatal("model catalog does not advertise a described max reasoning preset")
+}
+
 func TestReasoningEffortRouting(t *testing.T) {
 	cases := []struct{ model, effort, want string }{
 		{"claude-sonnet", "none", "Claude_Sonnet"},
@@ -177,6 +192,7 @@ func TestReasoningEffortRouting(t *testing.T) {
 		{"gpt-5.5", "low", "Gpt_5_5_Chat"},
 		{"gpt-5.5", "medium", "Gpt_5_5_Reasoning"},
 		{"gpt-5.6-reasoning", "none", "Gpt_5_6_Reasoning"},
+		{"gpt-5.6-reasoning", "max", "Gpt_5_6_Reasoning"},
 	}
 	for _, tc := range cases {
 		got, err := reasoningTone(tc.model, tc.effort)

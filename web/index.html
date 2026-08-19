@@ -1368,7 +1368,12 @@ async function loadModelTest(){
   $('modelTestRows').innerHTML='<tr><td colspan="4" class="empty">加载中...</td></tr>';
   try{
     const d=await api('/api/admin/models');
-    const models=d.data||[];
+    const all=d.data||[];
+    // Prefer explicit routes from Settings. Historical compatibility aliases
+    // are still exposed to API clients, but probing all of them needlessly
+    // produces tenant-specific refusal replies.
+    const configured=all.filter(m=>m&&m.configured===true);
+    const models=configured.length?configured:all;
     if(!models.length){$('modelTestRows').innerHTML='<tr><td colspan="4" class="empty">暂无可用模型</td></tr>';return;}
     $('modelTestRows').innerHTML=models.map(m=>`<tr data-model="${esc(m.id)}"><td><b>${esc(m.id)}</b></td><td><span class="status"><i></i>未测试</span></td><td style="font-size:12px;color:var(--muted)">-</td><td style="font-size:12px;color:var(--muted)">点击"测试全部"</td></tr>`).join('');
   }catch(e){$('modelTestRows').innerHTML=`<tr><td colspan="4" class="empty">${esc(e.message)}</td></tr>`;}
@@ -1396,14 +1401,30 @@ async function modelTestOne(id,row){
 async function modelTestAll(){
   const rows=[...document.querySelectorAll('#modelTestRows tr[data-model]')];
   if(!rows.length){showNotice('请先加载模型列表','error');return;}
+  // Await each probe. The old fire-and-forget loop overlapped every upstream
+  // request after 250 ms, which could turn a healthy account into a burst of
+  // rate limits and make later rows look falsely unavailable.
   for(let i=0;i<rows.length;i++){
-    modelTestOne(rows[i].dataset.model,rows[i]);
-    await new Promise(r=>setTimeout(r,250));
+    await modelTestOne(rows[i].dataset.model,rows[i]);
+    if(i<rows.length-1)await new Promise(r=>setTimeout(r,250));
   }
   showNotice('模型测试完成','success');
 }
 
 let benchPoll=null,benchTasksMeta=[];
+
+function benchEffortOption(raw){
+  // /api/admin/benchmark returns preset objects ({effort,description}); old
+  // code passed the object to String(), yielding the literal [object Object].
+  // Accept strings too so older servers and cached responses remain usable.
+  if(typeof raw==='string')return {value:raw,label:raw,description:''};
+  if(raw&&typeof raw==='object'){
+    const value=String(raw.effort??raw.value??'').trim();
+    const description=String(raw.description??'').trim();
+    return {value,label:value,description};
+  }
+  return {value:'',label:'',description:''};
+}
 
 async function loadBenchmark(){
   try{
@@ -1413,13 +1434,23 @@ async function loadBenchmark(){
     if(mSel&&!mSel.options.length){
       try{
         const md=await api('/api/admin/models');
-        const ids=(md.data||[]).map(m=>m.id);
-        mSel.innerHTML=ids.map(id=>`<option value="${esc(id)}"${id==='gpt-5.6-reasoning'?' selected':''}>${esc(id)}</option>`).join('');
-      }catch(e){mSel.innerHTML='<option value="gpt-5.6-reasoning">gpt-5.6-reasoning</option>';}
+        const all=md.data||[];
+        const configured=all.filter(m=>m&&m.configured===true);
+        const models=configured.length?configured:all;
+        const ids=models.map(m=>m&&m.id).filter(Boolean);
+        const preferred=String(d.defaultModel||'gpt-5.6-reasoning');
+        mSel.innerHTML=ids.map(id=>`<option value="${esc(id)}"${id===preferred?' selected':''}>${esc(id)}</option>`).join('');
+        if(!mSel.options.length)mSel.innerHTML=`<option value="${esc(preferred)}">${esc(preferred)}</option>`;
+      }catch(e){
+        const preferred=String(d.defaultModel||'gpt-5.6-reasoning');
+        mSel.innerHTML=`<option value="${esc(preferred)}">${esc(preferred)}</option>`;
+      }
     }
     const eSel=$('benchEffort');
     if(eSel&&!eSel.options.length){
-      eSel.innerHTML=(d.efforts||['max']).map(e=>`<option value="${esc(e)}"${e==='max'?' selected':''}>${esc(e)}</option>`).join('');
+      const efforts=(d.efforts||['max']).map(benchEffortOption).filter(e=>e.value);
+      const safe=efforts.length?efforts:[{value:'max',label:'max',description:''}];
+      eSel.innerHTML=safe.map(e=>`<option value="${esc(e.value)}"${e.value==='max'?' selected':''}${e.description?` title="${esc(e.description)}"`:''}>${esc(e.label)}</option>`).join('');
     }
     const hint=$('benchPyHint');
     if(hint)hint.innerHTML='内置纯 Go 隐藏评分器，不依赖 Python。八项任务中四项考编程（修缺陷、读报错闭环修复、多文件重构、算法与复杂度），编程任务必须在最新代码上通过 run_tests 才计闭环分。每项最多 14 步，全套约 8-20 分钟。评测消耗会记入「用量」，归类为 internal-benchmark。';

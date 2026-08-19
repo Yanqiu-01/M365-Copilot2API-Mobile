@@ -51,21 +51,41 @@ func (s *Server) adminBenchmark(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, map[string]any{
-		"run":     s.benchmark.snapshot(),
-		"tasks":   benchTaskCatalog(),
-		"efforts": advertisedReasoningEfforts,
+		"run":          s.benchmark.snapshot(),
+		"tasks":        benchTaskCatalog(),
+		"efforts":      advertisedReasoningEfforts,
+		"defaultModel": defaultBenchmarkModel(),
 	})
 }
 
-// adminBenchmarkRun validates the APK request shape. The task executor is not
-// yet recovered, so this endpoint reports that explicitly instead of returning
-// a fabricated run state.
+// benchmarkEffort keeps the user-visible effort token intact. In particular,
+// "max" is a first-class upstream/Codex tier, not an alias to "xhigh"; turning
+// it into a different value made the UI, run log, and actual request disagree.
 func benchmarkEffort(value string) (string, error) {
 	value = strings.ToLower(strings.TrimSpace(value))
-	if value == "" || value == "max" {
-		return "xhigh", nil
+	if value == "" {
+		return "max", nil
 	}
 	return normalizeReasoningEffort(value)
+}
+
+// benchmarkDefaultModel is kept pure so request handlers and tests do not
+// need to mutate the process-wide settings singleton merely to select a route.
+// The broad compatibility catalog contains historic/tenant-dependent aliases;
+// using one of those as the benchmark default can yield a generic upstream
+// refusal even though the gateway itself is healthy.
+func benchmarkDefaultModel(mappings []modelMapping) string {
+	for _, mapping := range mappings {
+		if model := strings.TrimSpace(mapping.PublicModel); model != "" && strings.TrimSpace(mapping.UpstreamTone) != "" {
+			return model
+		}
+	}
+	// Preserve the old API fallback for installations with no mappings.
+	return "gpt-5.6-reasoning"
+}
+
+func defaultBenchmarkModel() string {
+	return benchmarkDefaultModel(currentSettings().ModelMappings)
 }
 
 func (s *Server) adminBenchmarkRun(w http.ResponseWriter, r *http.Request) {
@@ -83,7 +103,7 @@ func (s *Server) adminBenchmarkRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.TrimSpace(body.Model) == "" {
-		body.Model = "gpt-5.6-reasoning"
+		body.Model = defaultBenchmarkModel()
 	}
 	if strings.TrimSpace(body.Effort) == "" {
 		body.Effort = "max"
