@@ -1,334 +1,294 @@
 package web
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
-	"path"
-	"sort"
-	"strings"
-	"sync"
 	"time"
-
-	"m365-copilot2api/internal/chathub"
 )
 
-// benchTask is the public task/run representation consumed by the APK-derived
-// administration UI. The task artifacts and grading function inventory are
-// retained in the APK's benchmark.go / benchmark_cases.go pclntab entries.
-type benchTask struct {
-	ID       string `json:"id"`
-	Title    string `json:"title"`
-	Detail   string `json:"detail"`
-	Category string `json:"category"`
-}
+// gradeBenchTask wraps the task-specific grader functions and normalizes their
+// (passed, total, failures) return into the front-end benchTaskResult. The APK
+// uses this adapter so each grader remains a pure function without knowledge of
+// the runtime state or HTTP serialization.
+func gradeBenchTask(task benchTask, files map[string]string) benchTaskResult {
+	var passed, total int
+	var failures []string
 
-type benchTaskResult struct {
-	benchTask
-	Status     string   `json:"status"`
-	NetScore   float64  `json:"netScore"`
-	Passed     int      `json:"passed"`
-	Floor      int      `json:"floor"`
-	Total      int      `json:"total"`
-	Steps      int      `json:"steps"`
-	Redundant  int      `json:"redundant"`
-	ElapsedMS  int64    `json:"elapsedMs"`
-	WroteFiles bool     `json:"wroteFiles"`
-	TestsPass  bool     `json:"testsPass"`
-	TestRuns   int      `json:"testRuns"`
-	Failures   []string `json:"failures,omitempty"`
-	Error      string   `json:"error,omitempty"`
-}
-
-type benchmarkRun struct {
-	State          string             `json:"state"`
-	Current        string             `json:"current,omitempty"`
-	Model          string             `json:"model,omitempty"`
-	Effort         string             `json:"effort,omitempty"`
-	Average        float64            `json:"average"`
-	CodingScore    float64            `json:"codingScore"`
-	ReasoningScore float64            `json:"reasoningScore"`
-	Tasks          []benchTaskResult  `json:"tasks"`
-	Log            []string           `json:"log"`
-	StartedAt      time.Time          `json:"startedAt,omitempty"`
-	FinishedAt     time.Time          `json:"finishedAt,omitempty"`
-	Cancellation   context.CancelFunc `json:"-"`
-}
-
-type benchmarkStore struct {
-	mu  sync.Mutex
-	run benchmarkRun
-}
-
-// benchTasks returns the eight APK benchmark lanes. Four are coding tasks and
-// four are reasoning/data tasks; the UI starts the coding subset with the first
-// four identifiers.
-func benchTasks() []benchTask {
-	return []benchTask{
-		{ID: "bugfix", Title: "库存预约修复", Detail: "修复库存预留、释放和审计轨迹中的契约违例。", Category: "coding"},
-		{ID: "debug", Title: "统计报告调试", Detail: "根据运行报错定位并修复统计报告模块。", Category: "coding"},
-		{ID: "refactor", Title: "用户数据重构", Detail: "合并用户/员工加载逻辑并保持数据契约。", Category: "coding"},
-		{ID: "algorithm", Title: "区间算法", Detail: "实现并验证区间处理的正确性与复杂度。", Category: "coding"},
-		{ID: "shift", Title: "排班推理", Detail: "根据规则与人员约束给出可验证的排班结论。", Category: "reasoning"},
-		{ID: "sales", Title: "销售分析", Detail: "从销售数据中计算指标并解释异常。", Category: "reasoning"},
-		{ID: "ledger", Title: "账本推理", Detail: "处理账本记录、无效操作和余额约束。", Category: "reasoning"},
-		{ID: "route", Title: "路径规划", Detail: "在给定图与约束下求解路径结果。", Category: "reasoning"},
-	}
-}
-
-// benchWeightedAverage uses the APK/UI split: coding contributes 60%,
-// reasoning contributes 40%. A missing category has zero contribution rather
-// than silently renormalising the other category.
-func benchWeightedAverage(tasks []benchTaskResult) (average, coding, reasoning float64) {
-	var codingSum, reasoningSum float64
-	var codingN, reasoningN int
-	for _, task := range tasks {
-		switch task.Category {
-		case "coding":
-			codingSum += task.NetScore
-			codingN++
-		case "reasoning":
-			reasoningSum += task.NetScore
-			reasoningN++
-		}
-	}
-	if codingN > 0 {
-		coding = codingSum / float64(codingN)
-	}
-	if reasoningN > 0 {
-		reasoning = reasoningSum / float64(reasoningN)
-	}
-	average = coding*0.60 + reasoning*0.40
-	return average, coding, reasoning
-}
-
-func (s *benchmarkStore) snapshot() benchmarkRun {
-	if s == nil {
-		return benchmarkRun{State: "idle"}
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := s.run
-	out.Tasks = append([]benchTaskResult(nil), s.run.Tasks...)
-	for i := range out.Tasks {
-		out.Tasks[i].Failures = append([]string(nil), s.run.Tasks[i].Failures...)
-	}
-	out.Log = append([]string(nil), s.run.Log...)
-	out.Cancellation = nil
-	return out
-}
-
-func (s *benchmarkStore) logf(format string, args ...any) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	line := fmt.Sprintf(format, args...)
-	s.run.Log = append(s.run.Log, line)
-	// Keep memory bounded while preserving enough context for the UI log pane.
-	if len(s.run.Log) > 500 {
-		s.run.Log = append([]string(nil), s.run.Log[len(s.run.Log)-500:]...)
-	}
-}
-
-func (s *benchmarkStore) update(fn func(*benchmarkRun)) {
-	if s == nil || fn == nil {
-		return
-	}
-	s.mu.Lock()
-	fn(&s.run)
-	s.run.Average, s.run.CodingScore, s.run.ReasoningScore = benchWeightedAverage(s.run.Tasks)
-	s.mu.Unlock()
-}
-
-func (s *benchmarkStore) stop() bool {
-	if s == nil {
-		return false
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.run.State != "running" || s.run.Cancellation == nil {
-		return false
-	}
-	s.run.Cancellation()
-	s.run.State = "cancelled"
-	s.run.FinishedAt = time.Now().UTC()
-	return true
-}
-
-func benchTaskCatalog() []benchTask {
-	return append([]benchTask(nil), benchTasks()...)
-}
-
-// benchWorkspace is the in-memory task filesystem used by the APK benchmark
-// agent. It deliberately does not expose host commands: benchmark tool calls
-// may only inspect or modify the supplied task artifacts.
-type benchWorkspace struct {
-	mu        sync.Mutex
-	files     map[string]string
-	testRuns  int
-	testsPass bool
-	wrote     bool
-	steps     int
-	redundant int
-	test      func(map[string]string) bool
-}
-
-func newBenchWorkspace(files map[string]string) *benchWorkspace {
-	workspace := &benchWorkspace{files: make(map[string]string)}
-	for name, content := range files {
-		if clean, err := cleanBenchPath(name); err == nil {
-			workspace.files[clean] = content
-		}
-	}
-	return workspace
-}
-
-// cleanBenchPath follows the APK's defensive path normalization: convert
-// Windows separators, reject empty/absolute/traversing paths, and retain a
-// clean slash-separated relative artifact name.
-func cleanBenchPath(name string) (string, error) {
-	name = strings.TrimSpace(strings.ReplaceAll(name, "\\", "/"))
-	if name == "" || strings.HasPrefix(name, "/") {
-		return "", fmt.Errorf("invalid benchmark path")
-	}
-	clean := path.Clean(name)
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
-		return "", fmt.Errorf("benchmark path escapes workspace")
-	}
-	return clean, nil
-}
-
-func (w *benchWorkspace) snapshot() map[string]string {
-	if w == nil {
-		return map[string]string{}
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	out := make(map[string]string, len(w.files))
-	for name, content := range w.files {
-		out[name] = content
-	}
-	return out
-}
-
-func (w *benchWorkspace) testStatus() (passed bool, runs int) {
-	if w == nil {
-		return false, 0
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.testsPass, w.testRuns
-}
-
-func (w *benchWorkspace) setTest(fn func(map[string]string) bool) {
-	if w == nil {
-		return
-	}
-	w.mu.Lock()
-	w.test = fn
-	w.mu.Unlock()
-}
-
-// benchToolSchema returns the APK benchmark's constrained task tools. The
-// model cannot invoke arbitrary command execution through this schema.
-func benchToolSchema() []chathub.Tool {
-	definition := func(name, description string, parameters map[string]any) chathub.Tool {
-		body, _ := json.Marshal(map[string]any{
-			"name":        name,
-			"description": description,
-			"parameters":  parameters,
-		})
-		return chathub.Tool{Type: "function", Function: body}
-	}
-	pathParam := map[string]any{
-		"type":       "object",
-		"properties": map[string]any{"path": map[string]any{"type": "string"}},
-		"required":   []string{"path"},
-	}
-	writeParam := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"path":    map[string]any{"type": "string"},
-			"content": map[string]any{"type": "string"},
-		},
-		"required": []string{"path", "content"},
-	}
-	return []chathub.Tool{
-		definition("list_files", "List benchmark workspace files.", map[string]any{"type": "object", "properties": map[string]any{}}),
-		definition("read_file", "Read one benchmark workspace file.", pathParam),
-		definition("write_file", "Write one benchmark workspace file.", writeParam),
-		definition("run_tests", "Run the benchmark task checks against the current workspace.", map[string]any{"type": "object", "properties": map[string]any{}}),
-	}
-}
-
-// execute applies one constrained benchmark tool call and returns a structured
-// tool response. The implementation is intentionally deterministic so hidden
-// graders can assess artifact changes rather than host-side side effects.
-func (w *benchWorkspace) execute(name string, arguments map[string]any) (map[string]any, error) {
-	if w == nil {
-		return nil, fmt.Errorf("benchmark workspace unavailable")
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.steps++
-
-	asPath := func() (string, error) {
-		raw, ok := arguments["path"].(string)
-		if !ok {
-			return "", fmt.Errorf("path is required")
-		}
-		return cleanBenchPath(raw)
-	}
-
-	switch name {
-	case "list_files":
-		files := make([]string, 0, len(w.files))
-		for file := range w.files {
-			files = append(files, file)
-		}
-		sort.Strings(files)
-		return map[string]any{"files": files}, nil
-	case "read_file":
-		file, err := asPath()
-		if err != nil {
-			return nil, err
-		}
-		content, ok := w.files[file]
-		if !ok {
-			return nil, fmt.Errorf("file not found: %s", file)
-		}
-		return map[string]any{"path": file, "content": content}, nil
-	case "write_file":
-		file, err := asPath()
-		if err != nil {
-			return nil, err
-		}
-		content, ok := arguments["content"].(string)
-		if !ok {
-			return nil, fmt.Errorf("content is required")
-		}
-		if previous, exists := w.files[file]; exists && previous == content {
-			w.redundant++
-		} else {
-			w.wrote = true
-			w.files[file] = content
-		}
-		return map[string]any{"path": file, "bytes": len(content)}, nil
-	case "run_tests":
-		w.testRuns++
-		if w.test != nil {
-			files := make(map[string]string, len(w.files))
-			for file, content := range w.files {
-				files[file] = content
-			}
-			w.testsPass = w.test(files)
-		} else {
-			w.testsPass = false
-		}
-		return map[string]any{"passed": w.testsPass, "runs": w.testRuns}, nil
+	switch task.Kind {
+	case "reasoning/schedule":
+		passed, total, failures = gradeShift(files)
+	case "reasoning/sales":
+		passed, total, failures = gradeSales(files)
+	case "reasoning/ledger":
+		passed, total, failures = gradeLedger(files)
+	case "reasoning/route":
+		passed, total, failures = gradeRoute(files)
+	case "programming/inventory":
+		passed, total, failures = gradeInventory(files)
 	default:
-		return nil, fmt.Errorf("unsupported benchmark tool: %s", name)
+		return benchTaskResult{
+			Verdict:  "error",
+			Score:    0,
+			Details:  fmt.Sprintf("unknown task kind: %s", task.Kind),
+			Failures: nil,
+		}
+	}
+
+	score := 0
+	if total > 0 {
+		score = (passed * 100) / total
+	}
+
+	verdict := "fail"
+	if passed == total {
+		verdict = "pass"
+	} else if passed > 0 {
+		verdict = "partial"
+	}
+
+	details := fmt.Sprintf("%d/%d checks passed", passed, total)
+	if len(failures) > 0 {
+		summary := failures[0]
+		if len(failures) > 1 {
+			summary = fmt.Sprintf("%s (+%d more)", summary, len(failures)-1)
+		}
+		details = fmt.Sprintf("%s — %s", details, summary)
+	}
+
+	return benchTaskResult{
+		Verdict:  verdict,
+		Score:    score,
+		Details:  details,
+		Failures: failures,
 	}
 }
+
+// runBenchTask executes a single benchmark task by sending the prompt to the
+// model and collecting the response. It returns the raw model output before
+// grading; the HTTP handler invokes gradeBenchTask separately.
+//
+// NOTE: This function requires integration with the router/upstream layer which
+// defines conversationContext, message, upstreamRequest, and sendUpstream. The
+// APK implementation routes through the existing M365 Copilot handler.
+func runBenchTask(task benchTask, model string) (map[string]string, error) {
+	// Placeholder implementation - the full version requires:
+	// 1. Building a message with task.Prompt
+	// 2. Sending to upstream via sendUpstream or equivalent router
+	// 3. Extracting the response content
+	// 4. Parsing artifacts from the response
+	
+	// For now, return an error indicating this needs router integration
+	return nil, fmt.Errorf("runBenchTask requires router integration (not yet connected)")
+}
+
+// extractArtifacts parses the model response for fenced code blocks and returns
+// a map of filename to content. The APK recognizes both ```language and
+// ```filename patterns.
+func extractArtifacts(content string) map[string]string {
+	files := make(map[string]string)
+	
+	// Simple fence extraction: split by ``` and process pairs
+	parts := splitByFence(content)
+	for i := 0; i+1 < len(parts); i += 2 {
+		header := parts[i]
+		body := parts[i+1]
+		
+		// Try to extract filename from header line
+		filename := parseFilename(header)
+		if filename == "" {
+			// Use language as extension
+			if lang := parseLanguage(header); lang != "" {
+				switch lang {
+				case "python", "py":
+					filename = "solution.py"
+				case "json":
+					filename = "output.json"
+				case "javascript", "js":
+					filename = "solution.js"
+				default:
+					filename = fmt.Sprintf("artifact.%s", lang)
+				}
+			} else {
+				continue
+			}
+		}
+		
+		files[filename] = body
+	}
+	
+	return files
+}
+
+// splitByFence splits content by ``` markers, returning alternating text and
+// code sections. The first element is text before the first fence.
+func splitByFence(content string) []string {
+	var parts []string
+	remaining := content
+	
+	for {
+		start := findFenceStart(remaining)
+		if start < 0 {
+			parts = append(parts, remaining)
+			break
+		}
+		
+		// Add text before fence
+		parts = append(parts, remaining[:start])
+		
+		// Find end of first line (the fence header)
+		lineEnd := start
+		for lineEnd < len(remaining) && remaining[lineEnd] != '\n' {
+			lineEnd++
+		}
+		if lineEnd < len(remaining) {
+			lineEnd++ // include the newline
+		}
+		
+		header := remaining[start:lineEnd]
+		remaining = remaining[lineEnd:]
+		
+		// Find closing fence
+		end := findFenceEnd(remaining)
+		if end < 0 {
+			// No closing fence, treat rest as code
+			parts = append(parts, header)
+			parts = append(parts, remaining)
+			break
+		}
+		
+		parts = append(parts, header)
+		parts = append(parts, remaining[:end])
+		
+		// Skip the closing fence line
+		remaining = remaining[end:]
+		for len(remaining) > 0 && (remaining[0] == '`' || remaining[0] == '\n' || remaining[0] == '\r') {
+			remaining = remaining[1:]
+		}
+	}
+	
+	return parts
+}
+
+func findFenceStart(s string) int {
+	for i := 0; i+2 < len(s); i++ {
+		if s[i] == '`' && s[i+1] == '`' && s[i+2] == '`' {
+			return i
+		}
+	}
+	return -1
+}
+
+func findFenceEnd(s string) int {
+	for i := 0; i+2 < len(s); i++ {
+		if s[i] == '`' && s[i+1] == '`' && s[i+2] == '`' {
+			return i
+		}
+	}
+	return -1
+}
+
+func parseFilename(header string) string {
+	// Remove leading ``` and whitespace
+	header = trimPrefix(header, "```")
+	header = trimSpace(header)
+	
+	// Check common patterns: ```filename.ext or ```language:filename.ext
+	if idx := indexByte(header, ':'); idx >= 0 {
+		header = header[idx+1:]
+		header = trimSpace(header)
+	}
+	
+	// If header looks like a filename (has . and no spaces before it), use it
+	dotIdx := indexByte(header, '.')
+	if dotIdx > 0 && dotIdx < len(header)-1 {
+		// Extract up to first whitespace or newline
+		for i := 0; i < len(header); i++ {
+			if header[i] == ' ' || header[i] == '\t' || header[i] == '\n' || header[i] == '\r' {
+				return header[:i]
+			}
+		}
+		return trimSpace(header)
+	}
+	
+	return ""
+}
+
+func parseLanguage(header string) string {
+	header = trimPrefix(header, "```")
+	header = trimSpace(header)
+	
+	// Language is first word before : or whitespace
+	for i := 0; i < len(header); i++ {
+		if header[i] == ' ' || header[i] == '\t' || header[i] == '\n' || header[i] == ':' {
+			return header[:i]
+		}
+	}
+	return header
+}
+
+func trimPrefix(s, prefix string) string {
+	if len(s) >= len(prefix) && s[:len(prefix)] == prefix {
+		return s[len(prefix):]
+	}
+	return s
+}
+
+func trimSpace(s string) string {
+	start := 0
+	for start < len(s) && (s[start] == ' ' || s[start] == '\t' || s[start] == '\n' || s[start] == '\r') {
+		start++
+	}
+	end := len(s)
+	for end > start && (s[end-1] == ' ' || s[end-1] == '\t' || s[end-1] == '\n' || s[end-1] == '\r') {
+		end--
+	}
+	return s[start:end]
+}
+
+func indexByte(s string, b byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == b {
+			return i
+		}
+	}
+	return -1
+}
+
+// startBenchmark initializes a new benchmark session for the given account and
+// returns the session ID. The APK stores session state in memory with TTL-based
+// cleanup.
+func startBenchmark(account string) (string, error) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Generate session ID
+	sessionID := fmt.Sprintf("bench_%d_%s", time.Now().Unix(), account[:min(8, len(account))])
+
+	// Initialize session state
+	session := &benchSession{
+		ID:        sessionID,
+		Account:   account,
+		StartedAt: time.Now(),
+		Tasks:     make(map[string]benchTaskState),
+	}
+
+	// Register all catalog tasks
+	for _, task := range benchTaskCatalog() {
+		session.Tasks[task.ID] = benchTaskState{
+			Status:    "pending",
+			StartedAt: time.Time{},
+		}
+	}
+
+	benchSessions[sessionID] = session
+	return sessionID, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// Global session store is defined in benchmark_test.go
+// Type definitions for conversationContext, message, upstreamRequest are in router.go
