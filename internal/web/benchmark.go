@@ -19,11 +19,34 @@ import (
 // benchTask is the public task/run representation consumed by the APK-derived
 // administration UI. The task artifacts and grading function inventory are
 // retained in the APK's benchmark.go / benchmark_cases.go pclntab entries.
+// benchTask 描述一条评测任务。前四个字段参与 JSON 序列化，供前端渲染；
+// 后三个是执行期数据，不出现在 API 响应中。
+//
+// APK 证据：元素大小 112 字节，字段偏移由 benchTasks 的 STR [x2,#N]
+// 序列（N = i*112 + 元素内偏移）确定：
+//
+//	+0/+8 ID、+16/+24 Title、+32/+40 Detail、+48/+56 Category
+//	+64 Files、+72 Protected、+80 Grader
+//
+// 实测点：i=0 的 +64/+72（+0x00e8/+0x00f4）、i=1 的 +176/+184/+192、
+// grader 槽位 i=2→304、i=3→408、i=4→520，相邻差恒为 112。
+//
+// 前端 index.html 只引用 id/title/detail/category，与此处 json 标签一致，
+// 证明后三个字段确为 json:"-"。
 type benchTask struct {
 	ID       string `json:"id"`
 	Title    string `json:"title"`
 	Detail   string `json:"detail"`
 	Category string `json:"category"`
+
+	// Files 是交给模型的初始工作区内容。
+	Files map[string]string `json:"-"`
+	// Protected 记录不得被篡改的输入，由 gradeBenchTask 校验。
+	Protected map[string]string `json:"-"`
+	// Grader 是该任务的隐藏评分器，由 benchTasks 直接挂载。
+	// APK 中八个 grade* 函数均无 BL 直接调用，而是以 funcval 形式
+	// 存入 .data.rel.ro（0x136c948-0x136c998），经此字段间接调用。
+	Grader func(map[string]string) (int, int, []string) `json:"-"`
 }
 
 type benchTaskResult struct {
@@ -66,16 +89,41 @@ type benchmarkStore struct {
 // benchTasks returns the eight APK benchmark lanes. Four are coding tasks and
 // four are reasoning/data tasks; the UI starts the coding subset with the first
 // four identifiers.
+//
+// APK 证据：八个 grade* 函数在 APK 中均无 BL 直接调用，而是以 funcval 存入
+// .data.rel.ro（0x136c948-0x136c998），由本函数挂载到各任务的 Grader 字段。
+// 挂载顺序由 benchTasks 的 ADRP 0x136c000 引用点确定：
+//
+//	+0x00ec gradeInventory  +0x01bc gradeDebug     +0x0348 gradeRefactor
+//	+0x03d8 gradeIntervals  +0x03e4 gradeShift     +0x046c gradeLedger
+//	+0x0568 gradeSales      +0x05f0 gradeRoute
+//
+// 与下列任务顺序逐一对应。
 func benchTasks() []benchTask {
+	none := func() map[string]string { return map[string]string{} }
 	return []benchTask{
-		{ID: "bugfix", Title: "库存预约修复", Detail: "修复库存预留、释放和审计轨迹中的契约违例。", Category: "coding"},
-		{ID: "debug", Title: "统计报告调试", Detail: "根据运行报错定位并修复统计报告模块。", Category: "coding"},
-		{ID: "refactor", Title: "用户数据重构", Detail: "合并用户/员工加载逻辑并保持数据契约。", Category: "coding"},
-		{ID: "algorithm", Title: "区间算法", Detail: "实现并验证区间处理的正确性与复杂度。", Category: "coding"},
-		{ID: "shift", Title: "排班推理", Detail: "根据规则与人员约束给出可验证的排班结论。", Category: "reasoning"},
-		{ID: "sales", Title: "销售分析", Detail: "从销售数据中计算指标并解释异常。", Category: "reasoning"},
-		{ID: "ledger", Title: "账本推理", Detail: "处理账本记录、无效操作和余额约束。", Category: "reasoning"},
-		{ID: "route", Title: "路径规划", Detail: "在给定图与约束下求解路径结果。", Category: "reasoning"},
+		{ID: "bugfix", Title: "库存预约修复", Detail: "修复库存预留、释放和审计轨迹中的契约违例。", Category: "coding",
+			Files: map[string]string{"inventory.py": benchInventorySource}, Protected: none(), Grader: gradeInventory},
+		{ID: "debug", Title: "统计报告调试", Detail: "根据运行报错定位并修复统计报告模块。", Category: "coding",
+			Files:     map[string]string{"stats.py": benchStatsSource, "run_report.txt": benchRunReport},
+			Protected: map[string]string{"run_report.txt": benchRunReport}, Grader: gradeDebug},
+		{ID: "refactor", Title: "用户数据重构", Detail: "合并用户/员工加载逻辑并保持数据契约。", Category: "coding",
+			Files:     map[string]string{"users.py": benchUsersSource, "staff.py": benchStaffSource, "people.json": benchPeopleJSON},
+			Protected: map[string]string{"people.json": benchPeopleJSON}, Grader: gradeRefactor},
+		// algorithm 无初始产物：rodata 中 "intervals.py" 仅在字符串池内出现，
+		// gradeIntervals 首项检查即「intervals.py 存在」，要求从零创建。
+		{ID: "algorithm", Title: "区间算法", Detail: "实现并验证区间处理的正确性与复杂度。", Category: "coding",
+			Files: none(), Protected: none(), Grader: gradeIntervals},
+		{ID: "shift", Title: "排班推理", Detail: "根据规则与人员约束给出可验证的排班结论。", Category: "reasoning",
+			Files: none(), Protected: none(), Grader: gradeShift},
+		{ID: "sales", Title: "销售分析", Detail: "从销售数据中计算指标并解释异常。", Category: "reasoning",
+			Files:     map[string]string{"sales.csv": benchSalesCSV},
+			Protected: map[string]string{"sales.csv": benchSalesCSV}, Grader: gradeSales},
+		{ID: "ledger", Title: "账本推理", Detail: "处理账本记录、无效操作和余额约束。", Category: "reasoning",
+			Files:     map[string]string{"ledger.txt": benchLedgerText},
+			Protected: map[string]string{"ledger.txt": benchLedgerText}, Grader: gradeLedger},
+		{ID: "route", Title: "路径规划", Detail: "在给定图与约束下求解路径结果。", Category: "reasoning",
+			Files: none(), Protected: none(), Grader: gradeRoute},
 	}
 }
 
