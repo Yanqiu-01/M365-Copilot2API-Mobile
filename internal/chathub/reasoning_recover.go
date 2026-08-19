@@ -60,6 +60,10 @@ func candidateMessages(frame map[string]any) []map[string]any {
 			// The APK walks arguments directly. Some SignalR variants put a
 			// message map here rather than under a messages array.
 			out = append(out, argument)
+			// 常见形态是 arguments[].messages；必须下钻，否则这条最主流的
+			// 路径会被漏掉（曾导致思考内容仅由完成帧兜底补发，
+			// 客户端两个增量几乎同时到达，思考时长被算成 0）。
+			appendMaps(argument["messages"])
 		}
 	}
 	if item, ok := frame["item"].(map[string]any); ok {

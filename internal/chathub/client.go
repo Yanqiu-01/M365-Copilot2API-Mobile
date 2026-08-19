@@ -347,6 +347,13 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 	var events []json.RawMessage
 	seenStreamTools := map[string]bool{}
 	var reasoningBuf strings.Builder
+	// 思考内容改由 reasoningPump 逐帧即时推送，取材范围与完成帧兜底一致。
+	reasoningPump := newReasoningPump(func(ev StreamEvent) error {
+		if onEvent == nil {
+			return nil
+		}
+		return onEvent(ev)
+	})
 
 	deadline := time.Now().Add(5 * time.Minute)
 	type wsRead struct {
@@ -381,6 +388,12 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 				log.Printf("[trace:ws] frame_len=%d preview=%q", len(part), truncate(part, 120))
 			}
 			events = append(events, json.RawMessage(append([]byte(nil), part...)))
+			// 思考内容按帧即时推送。取材逻辑与完成帧的兜底完全一致，
+			// 因此不再有「只能靠兜底补发」的差集 —— 这是思考时长被算成 0
+			// 的根因。
+			if err := reasoningPump.push(events[len(events)-1]); err != nil {
+				return Result{}, err
+			}
 			var obj map[string]any
 			if err := json.Unmarshal([]byte(part), &obj); err != nil {
 				continue
@@ -411,8 +424,10 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 					}
 
 					for _, ev := range classifyUpdateMessages(msgs) {
+						// reasoning 已由 reasoningPump 逐帧推送，此处不再重复
+						// 发送，否则客户端会收到两份相同的思考增量。
 						if ev.Kind == "reasoning" {
-							reasoningBuf.WriteString(ev.Text)
+							continue
 						}
 						ev.Raw = eventRaw(arg)
 						if ev.Kind != "text" && onEvent != nil {
@@ -498,9 +513,14 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 				if text == "" {
 					return Result{}, ErrEmptyCompletion
 				}
-				reasoning := reasoningBuf.String()
-				// APK fallback: some SignalR routes do not surface a live
-				// Chain-of-Thought event, but retain it in raw update frames.
+				// pump 已按帧推送并累计全部思考内容，直接采用即可；
+				// 不再从原始帧重算，避免与已发送的增量重复。
+				reasoning := reasoningPump.text()
+				if reasoning == "" {
+					reasoning = reasoningBuf.String()
+				}
+				// 极端兜底：pump 与实时累积都为空时才回退到全量扫描。
+				// 此时客户端拿不到增量，思考时长仍会是 0，但至少内容不丢。
 				if reasoning == "" {
 					reasoning = reasoningFromFrames(events)
 				}
