@@ -1,0 +1,233 @@
+######## gradeInventory ########
+== internal/web.gradeInventory  (internal/web/benchmark_cases.go:35-680, 3568 bytes)
+   -- 字符串字面量 --
+   +0x0074 len=19   "inventory.py 存在"
+   +0x01a4 len=22   "docstring 未被删除"
+   +0x01d8 len=19   "保留原 docstring"
+   +0x030c len=22   "Inventory / StockError"
+   +0x03c0 len=10   "if qty < 1"
+   +0x03e4 len=11   "if qty <= 0"
+   +0x0410 len=38   "if not isinstance(qty, int) or qty < 1"
+   +0x0430 len=35   "def add(self, sku, qty): if qty < 0"
+   +0x048c len=20   "qty < 1 或 qty <= 0"
+   +0x0540 len=11   "def reserve"
+   +0x055c len=11   "def release"
+   +0x05f4 len=5    "raise"
+   +0x0640 len=38   "缺陷2 失败的 reserve 不写 trail"
+   +0x0658 len=18   "trail 先于校验"
+   +0x0784 len=34   "reserve 对未知 sku 抛 KeyError"
+   +0x0830 len=10   "available("
+   +0x0868 len=52   "self.on_hand.get(sku, 0) - self.reserved.get(sku, 0)"
+   +0x0894 len=46   "缺陷4 reserve 依据可用量而非在库量"
+   +0x08ac len=20   "仍只比较 on_hand"
+   +0x08c0 len=27   "扣除已预留后再比较"
+   +0x0980 len=13   "def available"
+   +0x0a3c len=5    "raise"
+   +0x0a90 len=38   "缺陷5 release 后 reserved 不为负"
+   +0x0aa8 len=18   "未做下界保护"
+   +0x0b68 len=5    "max(0"
+   +0x0b90 len=13   "if result < 0"
+   +0x0be4 len=25   "available 不返回负数"
+   +0x0c10 len=11   "下界为 0"
+   +0x0cd8 len=19   "inventory.py 存在"
+   -- 立即数 / 常量池 --
+   +0x007c MOVZ #19<<0
+   +0x01ac MOVZ #22<<0
+   +0x03c4 MOVZ #10<<0
+   +0x03e8 MOVZ #11<<0
+   +0x0414 MOVZ #38<<0
+   +0x0434 MOVZ #35<<0
+   +0x0494 MOVZ #20<<0
+   +0x05f8 MOVZ #5<<0
+   +0x0660 MOVZ #18<<0
+   +0x078c MOVZ #34<<0
+   +0x086c MOVZ #52<<0
+   +0x089c MOVZ #46<<0
+   +0x08c8 MOVZ #27<<0
+   +0x0984 MOVZ #13<<0
+   +0x0bec MOVZ #25<<0
+
+######## gradeShift ########
+== internal/web.gradeShift  (internal/web/benchmark_cases.go:35-216, 4096 bytes)
+   -- 字符串字面量 --
+   +0x0030 len=13   "schedule.json"
+   +0x0068 len=23   "schedule.json 可解析"
+   +0x01f0 len=10   "Mon 的人"
+   +0x0228 len=10   "Tue 的人"
+   +0x0260 len=10   "Wed 的人"
+   +0x0298 len=10   "Thu 的人"
+   +0x03a0 len=23   "schedule.json 可解析"
+   +0x03bc len=11   "合法 JSON"
+   +0x0588 len=27   "四个互不相同的名字"
+   +0x0674 len=22   "约束1 Ann 不在 Mon"
+   +0x07ec len=13   "Mon=%s Tue=%s"
+   +0x0824 len=27   "约束2 Ben 在 Mon 或 Tue"
+   +0x0848 len=19   "Ben 在 Mon 或 Tue"
+   +0x0d08 len=23   "约束3 Cara 晚于 Dan"
+   +0x0d2c len=20   "Cara 的序号更大"
+   +0x0e10 len=22   "约束4 Dan 不在 Tue"
+   +0x0f30 len=21   "四个字母的名字"
+   -- 立即数 / 常量池 --
+   +0x0034 MOVZ #13<<0
+   +0x0070 MOVZ #23<<0
+   +0x01f4 MOVZ #10<<0
+   +0x03c4 MOVZ #11<<0
+   +0x04b8 CMP #4
+   +0x0590 MOVZ #27<<0
+   +0x067c MOVZ #22<<0
+   +0x0850 MOVZ #19<<0
+   +0x0d34 MOVZ #20<<0
+   +0x0f38 MOVZ #21<<0
+== internal/web.gradeShift.func1  (internal/web/benchmark_cases.go:173-179, 256 bytes)
+
+######## gradeDebug ########
+== internal/web.gradeDebug  (internal/web/benchmark_cases.go:35-775, 3360 bytes)
+   -- 字符串字面量 --
+   +0x0164 len=531  "def summarize(rows):\n    \"\"\"Return {\"count\", \"total\", \"mean\", \"max\"} for a list of numbers.\n\n    An empty list must return count 0, total 0, mean None, max None.\n    \"\"\"\n    total = 0\n    for value in rows:\n        total += value\n    count = len(rows)\n    mean = total / count\n    return {\n        \"count\": count,\n        \"total\": total,\n        \"mean\": mean,\n        \"max\": max(rows),\n    }\n\n\ndef format_report(rows):\n    stats = summarize(rows)\n    return f\"count={stats['count']} total={stats['total']} mean={stats['mean'].2f}\"\n"
+   +0x01ac len=27   "与原始文件完全一致"
+   +0x01c0 len=9    "已改写"
+   +0x02ac len=5    "].2f}"
+   +0x02ec len=23   "仍含 .2f 非法写法"
+   +0x0300 len=27   "使用 :.2f 或先格式化"
+   +0x0458 len=23   "mean 保留两位小数"
+   +0x0470 len=27   "未见两位小数格式化"
+   +0x0538 len=11   "if not rows"
+   +0x0560 len=17   "if len(rows) == 0"
+   +0x0584 len=13   "if count == 0"
+   +0x060c len=18   "空列表有守卫"
+   +0x0624 len=21   "未见空输入判断"
+   +0x0740 len=20   "mean/max 返回 None"
+   +0x0800 len=17   "\"max\": max(rows),"
+   +0x0830 len=25   "max 不再无条件调用"
+   +0x0848 len=22   "仍无条件 max(rows)"
+   +0x0ad4 len=13   "保留字段 "
+   +0x0be0 len=13   "def summarize"
+   +0x0c04 len=17   "def format_report"
+   +0x0c30 len=21   "两个函数都还在"
+   +0x0c5c len=27   "summarize 与 format_report"
+   -- 立即数 / 常量池 --
+   +0x014c CMP #531
+   +0x01b4 MOVZ #27<<0
+   +0x01c8 MOVZ #9<<0
+   +0x02b0 MOVZ #5<<0
+   +0x02f4 MOVZ #23<<0
+   +0x053c MOVZ #11<<0
+   +0x0564 MOVZ #17<<0
+   +0x0588 MOVZ #13<<0
+   +0x0614 MOVZ #18<<0
+   +0x062c MOVZ #21<<0
+   +0x0748 MOVZ #20<<0
+   +0x0838 MOVZ #25<<0
+   +0x0850 MOVZ #22<<0
+   +0x0a7c CMP #4
+
+######## gradeRefactor ########
+== internal/web.gradeRefactor  (internal/web/benchmark_cases.go:35-900, 4352 bytes)
+   -- 字符串字面量 --
+   +0x0320 len=17   "保留 load_users"
+   +0x0438 len=17   "保留 load_staff"
+   +0x0650 len=21   "创建了共享模块"
+   +0x0670 len=26   "未找到新的 .py 模块"
+   +0x07f0 len=9    "<= 12 行"
+   +0x083c len=9    "<= 12 行"
+   +0x0950 len=9    "<= 12 行"
+   +0x0a24 len=33   "users.py 改为引用共享模块"
+   +0x0a3c len=9    "未引用"
+   +0x0a9c len=9    "未引用"
+   +0x0b3c len=33   "staff.py 改为引用共享模块"
+   +0x0b54 len=9    "未引用"
+   +0x0c40 len=27   "users.py 不再重复校验"
+   +0x0d54 len=27   "staff.py 不再重复校验"
+   +0x0eac len=33   "年龄上限出现在共享模块"
+   +0x1018 len=36   "共享模块保留排序与规范化"
+   -- 立即数 / 常量池 --
+   +0x0328 MOVZ #17<<0
+   +0x0578 CMP #8
+   +0x0584 MOVZ #29557<<0
+   +0x0588 MOVK -> 1919251317
+   +0x05ac MOVZ #29811<<0
+   +0x05b0 MOVK -> 1717662835
+   +0x05cc CMP #3
+   +0x0658 MOVZ #21<<0
+   +0x0678 MOVZ #26<<0
+   +0x07d8 CMP #12
+   +0x07f8 MOVZ #9<<0
+   +0x0a2c MOVZ #33<<0
+   +0x0c48 MOVZ #27<<0
+   +0x1020 MOVZ #36<<0
+== internal/web.gradeRefactor.func1  (internal/web/benchmark_cases.go:862-869, 192 bytes)
+== internal/web.gradeRefactor.func2  (internal/web/benchmark_cases.go:876-885, 304 bytes)
+   -- 字符串字面量 --
+   +0x0084 len=5    "from "
+   +0x00e0 len=11   "import json"
+   -- 立即数 / 常量池 --
+   +0x0070 CMP #5
+   +0x00a8 CMP #7
+   +0x00e4 MOVZ #11<<0
+
+######## gradeIntervals ########
+== internal/web.gradeIntervals  (internal/web/benchmark_cases.go:35-987, 5200 bytes)
+   -- 字符串字面量 --
+   +0x0078 len=19   "intervals.py 存在"
+   +0x016c len=9    "def merge"
+   +0x01c4 len=9    "def merge"
+   +0x020c len=9    "缺失存"
+   +0x03c0 len=18   "先排序再扫描"
+   +0x04c8 len=26   "for i in range(start, end)"
+   +0x04ec len=20   "for x in range(s, e)"
+   +0x051c len=10   "set(range("
+   +0x0544 len=13   "|= set(range("
+   +0x06b4 len=18   "未见闭合比较"
+   +0x07a4 len=22   "if len(intervals) == 0"
+   +0x07d4 len=10   "if not lst"
+   +0x07f8 len=9    "return []"
+   +0x083c len=21   "未见空输入分支"
+   +0x0850 len=18   "空输入返回 []"
+   +0x09c0 len=19   "未见 tuple 构造"
+   +0x0a80 len=10   "notes.json"
+   +0x0aac len=20   "notes.json 可解析"
+   +0x0bdc len=19   "subtractComplexitys"
+   +0x0c68 len=22   "说明 merge 复杂度"
+   +0x0c8c len=10   "O(n log n)"
+   +0x0d7c len=25   "说明 subtract 复杂度"
+   +0x0da0 len=21   "O(n log n) 或 O(n+m)"
+   +0x0ed8 len=18   "给出做法说明"
+   +0x0fcc len=20   "notes.json 可解析"
+   +0x0fe8 len=11   "合法 JSON"
+   +0x109c len=22   "说明 merge 复杂度"
+   +0x10c4 len=10   "O(n log n)"
+   +0x1114 len=10   "O(n log n)"
+   +0x1168 len=10   "O(n log n)"
+   +0x11a8 len=25   "说明 subtract 复杂度"
+   +0x1284 len=18   "给出做法说明"
+   +0x1368 len=19   "intervals.py 存在"
+   -- 立即数 / 常量池 --
+   +0x0080 MOVZ #19<<0
+   +0x0170 MOVZ #9<<0
+   +0x03c8 MOVZ #18<<0
+   +0x04cc MOVZ #26<<0
+   +0x04f0 MOVZ #20<<0
+   +0x0520 MOVZ #10<<0
+   +0x0548 MOVZ #13<<0
+   +0x07a8 MOVZ #22<<0
+   +0x0844 MOVZ #21<<0
+   +0x0d84 MOVZ #25<<0
+   +0x0e84 CMP #5
+   +0x0e90 MOVZ #28220<<0
+   +0x0e94 MOVK -> 1818848828
+   +0x0ea4 CMP #62
+   +0x0eac CMP #4
+   +0x0ff0 MOVZ #11<<0
+== internal/web.gradeIntervals.func1  (internal/web/benchmark_cases.go:975-978, 288 bytes)
+   -- 字符串字面量 --
+   +0x0068 len=5    "nlogn"
+   -- 立即数 / 常量池 --
+   +0x006c MOVZ #5<<0
+
+######## gradeBenchTask ########
+== internal/web.gradeBenchTask  (internal/web/benchmark.go:505-515, 624 bytes)
+   -- 字符串字面量 --
+   +0x016c len=26   "受保护输入被修改: "
+   -- 立即数 / 常量池 --
+   +0x0170 MOVZ #26<<0
+
