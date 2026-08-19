@@ -56,7 +56,7 @@ printf '%s\n' '== 1/6 交叉编译 libm365.so =='
 (
   cd "$REPO"
   GOTOOLCHAIN=local GOPROXY=off CGO_ENABLED=0 GOOS=android GOARCH=arm64 GOARM64=v8.0 \
-    "$GO_BIN" build -trimpath -buildmode=pie -o "$OUT/libm365.so" ./cmd/server
+    "$GO_BIN" build -trimpath -buildvcs=false -buildmode=pie -o "$OUT/libm365.so" ./cmd/server
 )
 readelf -h "$OUT/libm365.so" | grep -E 'Type|Machine|Entry point'
 readelf -p .interp "$OUT/libm365.so" | grep -oE '/[a-z/0-9._]+'
