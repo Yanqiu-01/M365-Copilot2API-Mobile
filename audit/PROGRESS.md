@@ -22,6 +22,8 @@ sha256 已与 `go.dev/dl` 官方 JSON 逐位核对一致。
 ## 提交序列
 
 ```
+58282c4  recover: gradeDebug / gradeRefactor / gradeIntervals
+6fce8e0  audit: 提取 benchTasks 八个任务产物（逐字节验证）
 ad78f89  recover: benchChat / recordBenchUsage + agent_ledger 三项
 f0b6634  recover: callOwnChatCompletions
 b010d27  recover: gradeBenchTask
@@ -96,10 +98,16 @@ MOVZ x1,#<值长>  / STR x1,[x0,#8]                          ← 当前项的值
 是字符串，实为 Go 链接器按长度分桶的**字符串池**，池内含数十个
 不相关字面量。不可整段当单个字符串使用。
 
+### algorithm 任务无初始产物（已定论）
+
+全项目 rodata 中 `"intervals.py"` 仅出现在字符串池内，
+不存在对应的内容字面量。`gradeIntervals` 首个检查项为
+「intervals.py 存在」，即要求从零创建。故八个产物即为全部。
+
 ### 仍缺
 
-`algorithm` 任务的 `intervals.py` 未定位（0x420 之后区间待查）。
-`benchTask` 结构体需扩展产物字段，须先确认 APK 侧字段布局。
+`benchTask` 结构体需扩展产物字段（Files / Protected / 评分器挂载），
+须先确认 APK 侧字段布局，再补全 `benchTasks` 的八项任务定义。
 
 ## startBenchmark 已备齐的证据
 
@@ -156,14 +164,16 @@ test check verify validate browser lookup diff log show view grep
 
 ## 全局待恢复清单
 
-`audit/apk-missing-funcs-2026-08-19.txt` 原列 49 项，已完成 9 项：
+`audit/apk-missing-funcs-2026-08-19.txt` 原列 49 项，已完成 13 项：
 contextSimilarity / jaccardSimilarity / tokenize / gradeBenchTask /
 callOwnChatCompletions / benchChat / recordBenchUsage /
-toolArgumentsJSON / toolLooksObservational / shouldSuppressCompletedCall
+toolArgumentsJSON / toolLooksObservational / shouldSuppressCompletedCall /
+gradeDebug / gradeRefactor / gradeIntervals
+
+`benchmark_cases.go` 的 8 个评分器已全部恢复。
 
 剩余较大者：
 - `internal/web/model_tool_router.go` 9 项
-- `internal/web/benchmark_cases.go` 3 项（gradeDebug / gradeRefactor / gradeIntervals）
 - `internal/web/errors.go` 4 项
 - `cmd/server/net_mobile.go` 整个文件缺失（6 项）
 
