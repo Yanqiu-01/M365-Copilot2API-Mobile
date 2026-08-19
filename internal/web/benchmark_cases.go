@@ -16,12 +16,16 @@ type gradeReport struct {
 }
 
 func (r *gradeReport) eq(label string, got, want any) {
+	r.check(fmt.Sprint(got) == fmt.Sprint(want), "%s: got %s, want %s", label, trimForLog(fmt.Sprint(got)), trimForLog(fmt.Sprint(want)))
+}
+
+func (r *gradeReport) check(ok bool, format string, args ...any) {
 	r.total++
-	if fmt.Sprint(got) == fmt.Sprint(want) {
+	if ok {
 		r.passed++
 		return
 	}
-	r.failures = append(r.failures, fmt.Sprintf("%s: got %s, want %s", label, trimForLog(fmt.Sprint(got)), trimForLog(fmt.Sprint(want))))
+	r.failures = append(r.failures, fmt.Sprintf(format, args...))
 }
 
 func (r *gradeReport) numEq(label string, got any, want float64) {
