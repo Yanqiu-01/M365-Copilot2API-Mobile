@@ -367,6 +367,130 @@ func gradeInventory(files map[string]string) (int, int, []string) {
 	return report.tally()
 }
 
+// gradeDebug 校验 debug 任务：修复 stats.py 的 f-string 语法错误与
+// 空列表除零。APK 证据（benchmark_cases.go，结束行 775，3360 字节）：
+// 内嵌 531 字节的 stats.py 原文用于「与原始文件完全一致」判定，
+// 其余检查项均为对提交源码的静态匹配。
+func gradeDebug(files map[string]string) (int, int, []string) {
+	report := &gradeReport{}
+	source, ok := files["stats.py"]
+	if !ok {
+		report.total = 6
+		report.failures = append(report.failures, "stats.py 不存在")
+		return report.tally()
+	}
+	report.check(strings.TrimSpace(source) != strings.TrimSpace(debugOriginalStats), "与原始文件完全一致，未改写")
+	report.check(!strings.Contains(source, "].2f}"), "仍含 .2f 非法写法，应使用 :.2f 或先格式化")
+	report.check(containsAny(source, ":.2f", "round(", "format("), "未见两位小数格式化，mean 需保留两位小数")
+	report.check(containsAny(source, "if not rows", "if len(rows) == 0", "if count == 0"), "未见空输入判断，空列表需有守卫")
+	report.check(!strings.Contains(source, `"max": max(rows),`), "仍无条件 max(rows)，空列表时 mean/max 应返回 None")
+	report.check(strings.Contains(source, "def summarize") && strings.Contains(source, "def format_report"), "summarize 与 format_report 两个函数都还在")
+	return report.tally()
+}
+
+// debugOriginalStats 是 debug 任务的初始 stats.py，逐字节取自 APK
+// （0x51f000+722，531 字节）。gradeDebug 用它判定提交是否真的改写过。
+const debugOriginalStats = `def summarize(rows):
+    """Return {"count", "total", "mean", "max"} for a list of numbers.
+
+    An empty list must return count 0, total 0, mean None, max None.
+    """
+    total = 0
+    for value in rows:
+        total += value
+    count = len(rows)
+    mean = total / count
+    return {
+        "count": count,
+        "total": total,
+        "mean": mean,
+        "max": max(rows),
+    }
+
+
+def format_report(rows):
+    stats = summarize(rows)
+    return f"count={stats['count']} total={stats['total']} mean={stats['mean'].2f}"
+`
+
+// gradeRefactor 校验 refactor 任务：把 users.py 与 staff.py 的重复校验
+// 逻辑抽到共享模块。APK 证据（结束行 900，4352 字节，含两个闭包）：
+// 检查两个入口函数保留、新建了 .py 共享模块、两侧都改为引用它、
+// 各自不再重复校验、年龄上限与排序规范化移入共享模块。
+func gradeRefactor(files map[string]string) (int, int, []string) {
+	report := &gradeReport{}
+	users, hasUsers := files["users.py"]
+	staff, hasStaff := files["staff.py"]
+	if !hasUsers || !hasStaff {
+		report.total = 8
+		report.failures = append(report.failures, "users.py 或 staff.py 不存在")
+		return report.tally()
+	}
+	report.check(strings.Contains(users, "def load_users"), "保留 load_users")
+	report.check(strings.Contains(staff, "def load_staff"), "保留 load_staff")
+
+	shared := ""
+	sharedName := ""
+	for name, content := range files {
+		if name == "users.py" || name == "staff.py" || !strings.HasSuffix(name, ".py") {
+			continue
+		}
+		shared, sharedName = content, strings.TrimSuffix(name, ".py")
+		break
+	}
+	report.check(sharedName != "", "创建了共享模块；未找到新的 .py 模块")
+
+	imports := func(source string) bool {
+		if sharedName == "" {
+			return false
+		}
+		return strings.Contains(source, "from "+sharedName) || strings.Contains(source, "import "+sharedName)
+	}
+	report.check(imports(users), "users.py 改为引用共享模块；未引用")
+	report.check(imports(staff), "staff.py 改为引用共享模块；未引用")
+	report.check(!strings.Contains(users, "> 150"), "users.py 不再重复校验")
+	report.check(!strings.Contains(staff, "> 150"), "staff.py 不再重复校验")
+	report.check(strings.Contains(shared, "150") && containsAny(shared, ".sort(", "sorted(") && containsAny(shared, ".title()", ".strip()"), "共享模块保留排序与规范化，年龄上限出现在共享模块")
+	return report.tally()
+}
+
+// gradeIntervals 校验 algorithm 任务：从零实现 intervals.py 的 merge 与
+// subtract，并在 notes.json 中说明复杂度。
+//
+// APK 证据（结束行 987，5200 字节）：该任务无初始产物 —— 全项目 rodata
+// 中 "intervals.py" 只出现在字符串池内，不存在对应的内容字面量，
+// 与首个检查项「intervals.py 存在」相符。
+// 复杂度要求 merge 为 O(n log n)、subtract 为 O(n log n) 或 O(n+m)。
+func gradeIntervals(files map[string]string) (int, int, []string) {
+	report := &gradeReport{}
+	source, ok := files["intervals.py"]
+	if !ok {
+		report.total = 8
+		report.failures = append(report.failures, "intervals.py 不存在")
+		return report.tally()
+	}
+	report.check(strings.Contains(source, "def merge"), "缺失 def merge")
+	report.check(strings.Contains(source, "def subtract"), "缺失 def subtract")
+	report.check(containsAny(source, ".sort(", "sorted("), "未见排序；应先排序再扫描")
+	report.check(!containsAny(source, "for i in range(start, end)", "for x in range(s, e)", "set(range(", "|= set(range("), "逐点展开导致复杂度退化，应先排序再扫描")
+	report.check(containsAny(source, "<=", ">=", "<", ">"), "未见闭合比较")
+	report.check(containsAny(source, "if len(intervals) == 0", "if not lst", "return []"), "未见空输入分支；空输入返回 []")
+	report.check(strings.Contains(source, "(start, end)") || strings.Contains(source, "tuple"), "未见 tuple 构造")
+
+	notes, err := readJSONArtifact(files, "notes.json")
+	if err != nil {
+		report.check(false, "notes.json 可解析；%s", err.Error())
+		return report.tally()
+	}
+	mergeComplexity := strings.TrimSpace(fmt.Sprint(firstPresent(notes, "mergeComplexity", "merge_complexity")))
+	subtractComplexity := strings.TrimSpace(fmt.Sprint(firstPresent(notes, "subtractComplexity", "subtract_complexity")))
+	approach := strings.TrimSpace(fmt.Sprint(firstPresent(notes, "approach")))
+	report.check(strings.Contains(mergeComplexity, "O(n log n)"), "说明 merge 复杂度为 O(n log n)")
+	report.check(containsAny(subtractComplexity, "O(n log n)", "O(n+m)", "O(n + m)"), "说明 subtract 复杂度为 O(n log n) 或 O(n+m)")
+	report.check(approach != "" && approach != "<nil>", "给出做法说明")
+	return report.tally()
+}
+
 func containsAny(value string, needles ...string) bool {
 	for _, needle := range needles {
 		if strings.Contains(value, needle) {
