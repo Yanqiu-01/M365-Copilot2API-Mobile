@@ -1,0 +1,11 @@
+internal/auth/device.go
+internal/chathub/preheater.go
+internal/config/config.go
+internal/mcp/client.go
+internal/mcp/queue.go
+internal/mcp/stdio.go
+internal/mcp/tools.go
+internal/web/account_concurrency.go
+internal/web/account_health.go
+internal/web/public_identity.go
+internal/web/xml_tools.go
