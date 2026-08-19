@@ -72,9 +72,10 @@ GOOS=android GOARCH=arm64 GOARM64=v8.0
 - `aapt dump badging`：包名、版本、启动 Activity、ABI 与预期一致；
 - manifest 8 个应用组件均能在 DEX/smali 中找到；
 - 两个 native entry 均为未压缩、可执行权限；
-- `libcloudflared.so` 与原 APK 内容一致。
+- `libcloudflared.so` 与原 APK 内容一致；
+- 从最终 APK 提取出的 `libm365.so` 在 QEMU AArch64 环境中启动成功：`/` 返回 200、管理员登录返回 200、鉴权后的 `/api/health` 返回 200。
 
-工作区没有 `adb`、Android emulator 或真机，因此**尚未完成真实设备上的点击启动测试**。静态检查已经覆盖本次已定位的闪退原因，但仍请在你的 ARM64 Android 设备上实测。
+QEMU 只验证了 Go 子进程和 HTTP 服务，不提供 Android framework、Manifest 组件解析或真实 nativeLibraryDir 环境。工作区没有 `adb`、Android emulator 或真机，因此**尚未完成真实设备上的点击启动测试**。静态检查已经覆盖本次已定位的闪退原因，但仍请在你的 ARM64 Android 设备上实测。
 
 ## 安装与升级
 

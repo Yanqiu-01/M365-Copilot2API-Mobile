@@ -1,75 +1,74 @@
 # M365 网关 v2（可与原版并存）
 
-## 这是什么
+这是保留原始业务二进制、仅改包名并重签名的 ARM64 Android 版本；可与原版 `com.m365.gateway` 并存。它不包含恢复源码中的思考时长、评测记账或 DNS/PKCE 代码修复；需要这些修复请使用 v3。
 
-把原 APK 改包名后重新签名的版本，可与你当前安装的原版**并存**，
-互不覆盖。
+## 当前交付版本
 
-| 项 | 原版 | v2 |
-|---|---|---|
-| 包名 | `com.m365.gateway` | `com.m365.gateway2` |
-| 应用名 | M365 Copilot 网关 | M365 网关 v2 |
-| 版本 | 2.24.0 (59) | 2.24.0 (59) |
-| 签名 | 原作者密钥 | 本仓库自签名 |
+| 项目 | 值 |
+|---|---|
+| APK | `M365-Gateway-v2.apk` |
+| 包名 | `com.m365.gateway2` |
+| 应用名 | `M365 网关 v2` |
+| versionName / versionCode | `2.24.1` / `60` |
+| ABI | `arm64-v8a` |
+| SHA-256 | `5a515a050747ea51c80a23ba670e324c223eaf832a52b3aca3b98db7aa8952b9` |
 
-## 重要：这个 APK 不含本轮的代码修复
+`2.24.1 / 60` 是对此前 `2.24.0 / 59` v2 的覆盖更新。两个版本包名和签名相同，可以直接升级；原版和 v3 不受影响。
 
-重打包用的是**原 APK 里的 `libm365.so`**（已校验逐字节一致），
-不是恢复出的 Go 源码编译产物。
+## 本次启动修复
 
-所以以下修复**不在这个 APK 里**：
-- 思考时长显示为 0 的修复（f618502）
-- 评测重复记账的修复（379d4a4）
+此前 v2 的 manifest 仍使用 `.MainActivity` 等相对组件名。改包名后 Android 会把它解析为 `com.m365.gateway2.MainActivity`，但 DEX 中的类实际仍位于 `com.m365.gateway.*`，因此可能在点击图标时闪退。
 
-原因：APK 的 `.so` 带 JNI 入口，而恢复的源码是 `cmd/server` 可执行文件，
-两者入口不同。要产出含修复的版本，需要先补 JNI 封装层再交叉编译替换 `.so`。
+当前版已同步修正：
 
-这个 v2 的作用是**让你能并存安装、不必反复覆盖**，功能与原版完全相同。
+1. Activity、Service、Receiver、Provider 全部使用 DEX 中真实存在的完整类名 `com.m365.gateway.*`；
+2. `WakeProvider` 的 authority 和 MIME 常量改为 `com.m365.gateway2.wake`；
+3. 应用内广播 action 使用 `com.m365.gateway2.*`，避免和原版串扰；
+4. 恢复 `lib/arm64-v8a/*.so` 的 ZIP 执行权限（`0700`）。`GatewayService` 通过 `ProcessBuilder` 直接启动 `libm365.so`，apktool 重打包后产生的 `000` 权限不可用。
 
-## 安装
+## 与原版的内容关系
 
+以下内容均与原 APK 逐字节一致：
+
+- `lib/arm64-v8a/libm365.so`；
+- `lib/arm64-v8a/libcloudflared.so`；
+- `assets/web/index.html`、`login.html`、`debug.html`；
+- `assets/ca-certificates.crt`。
+
+变化仅包括 Android 身份/资源重编译、应用内私有标识同步、版本号和签名；APK 条目数保持 `22 -> 22`。
+
+## 已完成的验证
+
+- 包名：`com.m365.gateway2`；
+- 启动 Activity：`com.m365.gateway.MainActivity`；
+- 8 个 manifest 应用组件均能在 DEX/smali 中找到；
+- 无相对组件名残留；
+- Provider authority/MIME 与 manifest 一致；
+- 两个 native entry 未压缩且带可执行权限；
+- `zipalign` 通过；
+- APK Signature Scheme v2、v3 通过；
+- 从最终 APK 提取出的 ARM64 `libm365.so` 可在 QEMU AArch64 环境启动 HTTP 服务；`/`、管理员登录和鉴权后的 `/api/health` 均通过（不等同于真实 Android framework 测试）。
+
+工作区没有 `adb`、Android emulator 或真机，因此尚未完成真实设备上的点击启动测试；请在 ARM64 Android 设备上实测。
+
+## 安装与升级
+
+```bash
+adb install -r M365-Gateway-v2.apk
 ```
-adb install M365-Gateway-v2.apk
-```
 
-首次使用需重新配置账号与 API Key —— Android 按包名隔离存储，
-新应用读不到原版的数据。
+也可以在 Android 文件管理器中打开 APK，并允许安装未知来源应用。若已有旧 v2（`com.m365.gateway2`），应选择升级安装；如提示签名冲突，只卸载旧的 `com.m365.gateway2` 后再装（会清除该包数据），不要卸载原版或 v3。
 
-## 密钥库：请务必备份
+首次使用需重新配置账号与 API Key；Android 按包名隔离应用数据。
 
-`m365-gateway-v2.jks`
-- 别名 `m365v2`
+APK 仅支持 `arm64-v8a`。自签名证书出现“未知来源”提示属于预期行为。
+
+## 密钥库
+
+v2 与 v3 共用：`m365-gateway-v2.jks`
+
+- 别名：`m365v2`
 - 库口令 / 密钥口令：`[REDACTED]`
 - 证书 SHA-256：`8199a4c91043d857ffc88303ab2949639c1337455fd0ffd0891d50d88d27b418`
 
-以后所有 v2 更新都必须用这个密钥签名，否则无法覆盖安装。
-**弄丢就只能再换一次包名**。
-
-## 改动清单
-
-只改了三处，未触碰任何业务逻辑：
-
-1. `AndroidManifest.xml`
-   - `package`: `com.m365.gateway` → `com.m365.gateway2`
-   - `WakeProvider` 的 `android:authorities` 同步改名
-     （必须改，否则两版并存会因 authority 冲突而安装失败）
-2. `res/values/strings.xml` 的 `app_name`
-3. 四个应用内广播 action 加 `2` 后缀（smali 6 个文件共 15 处 + manifest）
-   - `KEEPALIVE` / `START` / `STOP` / `TUNNEL_START`
-   - 目的是避免两个版本互相唤醒或串扰
-
-**smali 类路径保持原样**（仍是 `com/m365/gateway/...`）。
-Android 只按 manifest 的 `package` 识别应用身份，改类路径没必要且易出错。
-
-## 校验
-
-```
-签名          v2 + v3 通过（v1 未启用，minSdk 26 无需 v1）
-libm365.so    与原包逐字节一致
-libcloudflared.so  一致
-assets/web/*  一致
-条目数        22 → 22，无缺失
-zipalign      4 字节对齐通过
-```
-
-`classes.dex` 因修改 action 字符串而重新编译，属预期变化。
+请备份密钥库。后续 v2/v3 更新必须使用同一密钥，否则无法覆盖安装。

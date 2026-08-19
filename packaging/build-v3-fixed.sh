@@ -15,9 +15,15 @@
 #      而 Java 用 ProcessBuilder 直接执行 libm365.so，必须恢复 0700。
 set -euo pipefail
 
-SRC=${1:?用法: build-v3-fixed.sh <原始 base.apk> [输出目录]}
-OUT=${2:-./out-v3}
+SRC_INPUT=${1:?用法: build-v3-fixed.sh <原始 base.apk> [输出目录]}
+OUT_INPUT=${2:-./out-v3}
 REPO=$(cd "$(dirname "$0")/.." && pwd)
+SRC=$(realpath "$SRC_INPUT")
+OUT=$(realpath -m "$OUT_INPUT")
+if [ ! -f "$SRC" ]; then
+  echo "原始 APK 不存在: $SRC" >&2
+  exit 1
+fi
 NEW_PKG=com.m365.gateway3
 OLD_PKG=com.m365.gateway
 NEW_LABEL='M365 网关 v3 修复版'
@@ -35,6 +41,9 @@ if [ -z "${GO_BIN:-}" ]; then
   else
     GO_BIN=go
   fi
+fi
+if [[ "$GO_BIN" == */* ]]; then
+  GO_BIN=$(realpath "$GO_BIN")
 fi
 if ! command -v "$GO_BIN" >/dev/null 2>&1 && [ ! -x "$GO_BIN" ]; then
   echo "找不到 Go 编译器: $GO_BIN" >&2
@@ -70,6 +79,8 @@ version_code, version_name = sys.argv[5:7]
 
 manifest_path = root / 'AndroidManifest.xml'
 s = manifest_path.read_text(encoding='utf-8')
+if f'package="{old_pkg}"' not in s:
+    raise SystemExit(f'expected package not found: {old_pkg}')
 s = s.replace(f'package="{old_pkg}"', f'package="{new_pkg}"', 1)
 # Provider authority 是应用私有标识，必须与 provider 内部常量同步。
 s = s.replace(f'"{old_pkg}.wake"', f'"{new_pkg}.wake"')
@@ -97,25 +108,35 @@ s = re.sub(r'versionName: .*', f'versionName: {version_name}', s, count=1)
 yml_path.write_text(s, encoding='utf-8')
 
 # 所有 smali 中的应用私有 action、WakeProvider 的 authority/MIME 常量。
-for path in (root / 'smali').rglob('*.smali'):
-    text = path.read_text(encoding='utf-8')
-    old = text
-    text = text.replace(f'{old_pkg}.KEEPALIVE', f'{new_pkg}.KEEPALIVE')
-    text = text.replace(f'{old_pkg}.START', f'{new_pkg}.START')
-    text = text.replace(f'{old_pkg}.STOP', f'{new_pkg}.STOP')
-    text = text.replace(f'{old_pkg}.TUNNEL_START', f'{new_pkg}.TUNNEL_START')
-    text = text.replace(f'{old_pkg}.wake', f'{new_pkg}.wake')
-    if text != old:
-        path.write_text(text, encoding='utf-8')
+smali_dirs = [path for path in root.glob('smali*') if path.is_dir()]
+for smali_dir in smali_dirs:
+    for path in smali_dir.rglob('*.smali'):
+        text = path.read_text(encoding='utf-8')
+        old = text
+        text = text.replace(f'{old_pkg}.KEEPALIVE', f'{new_pkg}.KEEPALIVE')
+        text = text.replace(f'{old_pkg}.START', f'{new_pkg}.START')
+        text = text.replace(f'{old_pkg}.STOP', f'{new_pkg}.STOP')
+        text = text.replace(f'{old_pkg}.TUNNEL_START', f'{new_pkg}.TUNNEL_START')
+        text = text.replace(f'{old_pkg}.wake', f'{new_pkg}.wake')
+        if text != old:
+            path.write_text(text, encoding='utf-8')
 
-# 静态一致性检查：manifest 里的组件必须在 dex/smali 中存在。
-for component in ('MainActivity', 'AuthActivity', 'DiagActivity', 'TunnelActivity',
-                  'WakeProvider', 'GatewayService', 'KeepAliveReceiver', 'BootReceiver'):
-    expected = root / ('smali/' + old_pkg.replace('.', '/') + '/' + component + '.smali')
-    if not expected.exists():
-        raise SystemExit(f'component class missing: {expected}')
-if f'{old_pkg}.KEEPALIVE' in manifest_path.read_text(encoding='utf-8'):
-    raise SystemExit('old private action remains in manifest')
+# 静态一致性检查：manifest 里的组件必须在 dex/smali 中存在，且不能
+# 因改包名再次留下相对组件名或旧的应用私有标识。
+components = ('MainActivity', 'AuthActivity', 'DiagActivity', 'TunnelActivity',
+              'WakeProvider', 'GatewayService', 'KeepAliveReceiver', 'BootReceiver')
+manifest_after = manifest_path.read_text(encoding='utf-8')
+for component in components:
+    suffix = old_pkg.replace('.', '/') + '/' + component + '.smali'
+    if not any((smali_dir / suffix).exists() for smali_dir in smali_dirs):
+        raise SystemExit(f'component class missing: {suffix}')
+if re.search(r'android:name="\.(?:' + '|'.join(components) + r')"', manifest_after):
+    raise SystemExit('relative application component remains in manifest')
+for token in (f'{old_pkg}.wake', f'{old_pkg}.KEEPALIVE', f'{old_pkg}.START',
+              f'{old_pkg}.STOP', f'{old_pkg}.TUNNEL_START'):
+    for path in [manifest_path, *[p for d in smali_dirs for p in d.rglob('*.smali')]]:
+        if token in path.read_text(encoding='utf-8', errors='ignore'):
+            raise SystemExit(f'old private identity remains: {token} in {path}')
 PY
 
 printf '%s\n' '== 4/6 打包（必须使用 aapt2）=='
@@ -174,5 +195,8 @@ for n in (so, cf):
     print(n, 'mode=', oct((i.external_attr >> 16) & 0xffff), 'compress=', i.compress_type)
 print('条目数            :', len(old.namelist()), '->', len(new.namelist()))
 PY
-sha256sum "$OUT/M365-Gateway-v3-fixed.apk" | tee "$OUT/M365-Gateway-v3-fixed.apk.sha256"
+(
+  cd "$OUT"
+  sha256sum M365-Gateway-v3-fixed.apk | tee M365-Gateway-v3-fixed.apk.sha256
+)
 echo "完成：$OUT/M365-Gateway-v3-fixed.apk"
