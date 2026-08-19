@@ -431,6 +431,9 @@ func (s *Server) callOwnChatCompletions(ctx context.Context, payload []byte, tim
 	defer cancel()
 	request := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/chat/completions", bytes.NewReader(payload))
 	request.Header.Set("Content-Type", "application/json")
+	// 标记为内部自调用：openaiChat 末尾的 bindConversation 会据此跳过用量
+	// 记账，避免与 recordBenchUsage 对同一次调用重复计入统计。
+	request.Header.Set(internalCallHeader, "benchmark")
 	recorder := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() { s.openaiChat(recorder, request); close(done) }()

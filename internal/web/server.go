@@ -1967,6 +1967,11 @@ func (s *Server) bindConversation(acc auth.AccountToken, body *oaiReq, r *http.R
 	}
 
 	apiKey := extractAPIKey(r)
+	// 内部自调用（如评测经 callOwnChatCompletions 走本处理器）由调用方
+	// 自行记账，此处跳过，否则同一次调用会被计入两条用量记录。
+	if isInternalCall(r) {
+		return
+	}
 	historyTokens := int64(0)
 	upper := len(body.Messages) - 1
 	if upper < 0 {
@@ -2037,4 +2042,16 @@ func extractOIDTID(accessToken string) (oid, tid string) {
 		tid = v
 	}
 	return oid, tid
+}
+
+// internalCallHeader 标记进程内自调用。带此头的请求由调用方负责用量记账，
+// bindConversation 会跳过统计，避免同一次调用被重复计入。
+const internalCallHeader = "X-M365-Internal-Call"
+
+// isInternalCall 判定请求是否来自进程内自调用。
+func isInternalCall(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	return strings.TrimSpace(r.Header.Get(internalCallHeader)) != ""
 }
