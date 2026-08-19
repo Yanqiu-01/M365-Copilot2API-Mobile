@@ -11,7 +11,7 @@
 | 应用名 | `M365 网关 v3 修复版` |
 | versionName / versionCode | `2.24.2` / `61` |
 | ABI | `arm64-v8a` |
-| SHA-256 | `28c0cfb1d6a18205eb4fce2eb947a48260284c30dd15f388e73b06ad5ffb9067` |
+| SHA-256 | `d3a751581f1eba623491422d900d422b3842a95e1a63455ba3b2f724d81f2842` |
 
 本次 `2.24.2 / 61` 是对此前 `2.24.1 / 60` v3 的覆盖更新；两者包名和签名相同，可以直接升级。原版 `com.m365.gateway` 与 v2 `com.m365.gateway2` 不受影响。
 
@@ -73,7 +73,7 @@ GOOS=android GOARCH=arm64 GOARM64=v8.0
 - manifest 8 个应用组件均能在 DEX/smali 中找到；
 - 两个 native entry 均为未压缩、可执行权限；
 - `libcloudflared.so` 与原 APK 内容一致；
-- 从最终 APK 提取出的 `libm365.so` 在 QEMU AArch64 环境中启动成功：`/` 返回 200、管理员登录返回 200、鉴权后的 `/api/health` 返回 200。
+- 从最终 APK 提取出的 `libm365.so` 在 QEMU AArch64 环境中启动成功：`/`、`/login`、管理员登录和鉴权后的 `/api/health` 均返回 200；可用 `packaging/qemu-smoke.sh` 重跑。
 
 QEMU 只验证了 Go 子进程和 HTTP 服务，不提供 Android framework、Manifest 组件解析或真实 nativeLibraryDir 环境。工作区没有 `adb`、Android emulator 或真机，因此**尚未完成真实设备上的点击启动测试**。静态检查已经覆盖本次已定位的闪退原因，但仍请在你的 ARM64 Android 设备上实测。
 

@@ -45,7 +45,7 @@ ln -sf /lib/ld-linux-aarch64.so.1 "$ROOT/system/bin/linker64"
 echo $! > "$PIDFILE"
 BASE="http://127.0.0.1:$PORT"
 for _ in $(seq 1 80); do
-  code=$(curl -sS --max-time 1 -o /dev/null -w '%{http_code}' "$BASE/" || true)
+  code=$(curl -sS --max-time 1 -o /dev/null -w '%{http_code}' "$BASE/" 2>/dev/null || true)
   if [ "$code" = 200 ]; then break; fi
   if ! kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
     echo 'QEMU 子进程提前退出；日志：' >&2
@@ -54,18 +54,18 @@ for _ in $(seq 1 80); do
   fi
   sleep 0.25
 done
-code=$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' "$BASE/" || true)
+code=$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' "$BASE/" 2>/dev/null || true)
 [ "$code" = 200 ] || { echo "GET / 返回 $code" >&2; cat "$LOG" >&2; exit 1; }
-code=$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' "$BASE/login" || true)
+code=$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' "$BASE/login" 2>/dev/null || true)
 [ "$code" = 200 ] || { echo "GET /login 返回 $code" >&2; cat "$LOG" >&2; exit 1; }
 COOKIE="$WORK/cookie.txt"
 code=$(curl -sS --max-time 3 -c "$COOKIE" -b "$COOKIE" \
   -H 'Content-Type: application/json' \
   -d '{"password":"qemu-test-password"}' \
-  -o /dev/null -w '%{http_code}' "$BASE/api/admin/login" || true)
+  -o /dev/null -w '%{http_code}' "$BASE/api/admin/login" 2>/dev/null || true)
 [ "$code" = 200 ] || { echo "POST /api/admin/login 返回 $code" >&2; cat "$LOG" >&2; exit 1; }
 code=$(curl -sS --max-time 3 -c "$COOKIE" -b "$COOKIE" \
-  -o /dev/null -w '%{http_code}' "$BASE/api/health" || true)
+  -o /dev/null -w '%{http_code}' "$BASE/api/health" 2>/dev/null || true)
 [ "$code" = 200 ] || { echo "GET /api/health 返回 $code" >&2; cat "$LOG" >&2; exit 1; }
 printf 'QEMU smoke OK: package APK=%s; /=%s /login=%s login=%s /api/health=%s\n' \
   "$(basename "$APK")" 200 200 200 200

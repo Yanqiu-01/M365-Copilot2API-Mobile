@@ -11,7 +11,7 @@
 | 应用名 | `M365 网关 v2` |
 | versionName / versionCode | `2.24.1` / `60` |
 | ABI | `arm64-v8a` |
-| SHA-256 | `5a515a050747ea51c80a23ba670e324c223eaf832a52b3aca3b98db7aa8952b9` |
+| SHA-256 | `53ca9b6c22d4d0e719531ec427035835426aa8f6fe2f6c670bb06862e4a82f80` |
 
 `2.24.1 / 60` 是对此前 `2.24.0 / 59` v2 的覆盖更新。两个版本包名和签名相同，可以直接升级；原版和 v3 不受影响。
 
@@ -47,7 +47,7 @@
 - 两个 native entry 未压缩且带可执行权限；
 - `zipalign` 通过；
 - APK Signature Scheme v2、v3 通过；
-- 从最终 APK 提取出的 ARM64 `libm365.so` 可在 QEMU AArch64 环境启动 HTTP 服务；`/`、管理员登录和鉴权后的 `/api/health` 均通过（不等同于真实 Android framework 测试）。
+- 从最终 APK 提取出的 ARM64 `libm365.so` 可在 QEMU AArch64 环境启动 HTTP 服务；`/`、`/login`、管理员登录和鉴权后的 `/api/health` 均通过（可用 `packaging/qemu-smoke.sh` 重跑，不等同于真实 Android framework 测试）。
 
 工作区没有 `adb`、Android emulator 或真机，因此尚未完成真实设备上的点击启动测试；请在 ARM64 Android 设备上实测。
 
