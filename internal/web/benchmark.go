@@ -231,6 +231,33 @@ func (w *benchWorkspace) setTest(fn func(map[string]string) bool) {
 	w.mu.Unlock()
 }
 
+// gradeBenchTask 校验受保护输入未被篡改。它不做打分，也不路由任何评分器；
+// 返回空串表示通过，否则返回诊断信息。
+//
+// APK 证据（tools/apktool，benchmark.go:505-515，624 字节）：
+//   - 调用图仅含 mapiterinit / mapiternext / newobject / cleanBenchPath /
+//     mapaccess2_faststr / memequal / concatstring2，无任何 grade* 调用；
+//   - 返回单值经 runBenchTask +0x01d4 的 convTstring 处理，故返回类型为
+//     string，而非结构体；
+//   - +0x0104 对被遍历 map 的每个键调用 cleanBenchPath 规范化后，
+//     +0x011c 在第二个 map 中查找同名项；
+//   - +0x0124 先比较长度（LDR x2,[x0,#8] 与栈上原长度），长度不等即判定
+//     被修改，长度相等才在 +0x0144 调用 memequal 比较内容；
+//   - +0x0168 引用长度 26 的前缀 "受保护输入被修改: "（MOVZ x2,#26），
+//     经 concatstring2 与文件名拼接，前缀在前。
+func gradeBenchTask(protected, submitted map[string]string) string {
+	for name, original := range protected {
+		clean, err := cleanBenchPath(name)
+		if err != nil {
+			continue
+		}
+		if current, ok := submitted[clean]; !ok || current != original {
+			return "受保护输入被修改: " + name
+		}
+	}
+	return ""
+}
+
 // benchToolSchema returns the APK benchmark's constrained task tools. The
 // model cannot invoke arbitrary command execution through this schema.
 func benchToolSchema() []chathub.Tool {
