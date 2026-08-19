@@ -2,6 +2,10 @@ package web
 
 import (
 	"math"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -91,42 +95,139 @@ func TestContextSimilarityEmptyInputs(t *testing.T) {
 	}
 }
 
-// APK 的 matchedBy 前缀只有 context_prefix_ 与 context_similar_，
-// 不存在 context_suffix_；相似度兜底必须使用前者之外的 similar 语义。
-func TestMatchSimilarLockedRespectsThresholdAndFingerprint(t *testing.T) {
-	sr := &sessionResolver{
-		sessions:   map[string]sessionBinding{},
-		contextTTL: 2 * time.Hour,
-	}
+// Resolve 的相似度兜底：matchedBy 必须是 context_similar_%.2f 形式，
+// 且只在同一 IP/UA 指纹下命中。
+func TestResolveSimilarFallbackFormatAndFingerprint(t *testing.T) {
+	t.Setenv("M365_CONTEXT_SIMILARITY", "0.6")
 	hist := []oaiMsg{
 		{Role: "user", Content: "alpha beta gamma delta"},
 		{Role: "assistant", Content: "epsilon zeta eta theta"},
 	}
+	newResolver := func() *sessionResolver {
+		sr := &sessionResolver{
+			sessions:    map[string]sessionBinding{},
+			byExplicit:  map[string]string{},
+			ttl:         2 * time.Hour,
+			contextTTL:  2 * time.Hour,
+			maxSessions: defaultMaxSessions,
+		}
+		sr.persist = &persistStore{flush: func() error { return nil }}
+		return sr
+	}
+	req := func(ua string) *http.Request {
+		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		r.RemoteAddr = "10.0.0.1:1234"
+		r.Header.Set("User-Agent", ua)
+		return r
+	}
+
+	// 相似但非严格前缀：删掉首条、改动尾部措辞
+	partial := []oaiMsg{
+		{Role: "assistant", Content: "epsilon zeta eta theta"},
+		{Role: "user", Content: "alpha beta gamma"},
+	}
+
+	sr := newResolver()
+	r := req("agent/1.0")
 	sr.sessions["s1"] = sessionBinding{
 		SessionID:      "s1",
-		IPFingerprint:  "fp-a",
+		ConversationID: "c1",
+		AccountID:      "a1",
+		IPFingerprint:  clientIPFingerprint(r),
 		ContextHistory: hist,
 		LastUsedAt:     time.Now().UTC(),
 	}
-
-	// Same fingerprint, identical content -> match at 100.
-	id, pct := sr.matchSimilarLocked("fp-a", hist)
-	if id != "s1" || pct != 100 {
-		t.Fatalf("expected s1/100, got %q/%d", id, pct)
+	got := sr.Resolve(r, &oaiReq{Messages: partial})
+	if got.IsNew || got.SessionID != "s1" {
+		t.Fatalf("expected similar match on s1, got %#v", got)
+	}
+	if !strings.HasPrefix(got.MatchedBy, "context_similar_") {
+		t.Fatalf("matchedBy=%q want context_similar_ prefix", got.MatchedBy)
+	}
+	// %.2f 形式：前缀后应是形如 0.83 的两位小数
+	suffix := strings.TrimPrefix(got.MatchedBy, "context_similar_")
+	if _, err := strconv.ParseFloat(suffix, 64); err != nil {
+		t.Fatalf("matchedBy suffix %q not a float: %v", suffix, err)
+	}
+	if len(suffix) < 3 || suffix[1] != '.' || len(suffix)-2 != 2 {
+		t.Fatalf("matchedBy suffix %q is not %%.2f formatted", suffix)
+	}
+	if got.HistoryLen != 0 {
+		t.Fatalf("similar fallback HistoryLen=%d want 0", got.HistoryLen)
 	}
 
-	// Different fingerprint must not match even with identical content.
-	if id, _ := sr.matchSimilarLocked("fp-b", hist); id != "" {
-		t.Fatalf("fingerprint mismatch must not match, got %q", id)
+	// 不同 UA -> 指纹不同 -> 不得命中
+	sr2 := newResolver()
+	sr2.sessions["s1"] = sessionBinding{
+		SessionID:      "s1",
+		IPFingerprint:  clientIPFingerprint(req("agent/1.0")),
+		ContextHistory: hist,
+		LastUsedAt:     time.Now().UTC(),
+	}
+	if got := sr2.Resolve(req("other/2.0"), &oaiReq{Messages: partial}); !got.IsNew {
+		t.Fatalf("fingerprint mismatch must not match, got %#v", got)
 	}
 
-	// Unrelated content falls below threshold.
-	if id, _ := sr.matchSimilarLocked("fp-a", []oaiMsg{{Role: "user", Content: "totally different words here"}}); id != "" {
-		t.Fatalf("below-threshold content must not match, got %q", id)
+	// 阈值抬高到 1.0 后，非全等内容不得命中
+	t.Setenv("M365_CONTEXT_SIMILARITY", "1")
+	sr3 := newResolver()
+	r3 := req("agent/1.0")
+	sr3.sessions["s1"] = sessionBinding{
+		SessionID:      "s1",
+		IPFingerprint:  clientIPFingerprint(r3),
+		ContextHistory: hist,
+		LastUsedAt:     time.Now().UTC(),
+	}
+	if got := sr3.Resolve(r3, &oaiReq{Messages: partial}); !got.IsNew {
+		t.Fatalf("threshold=1 must reject partial match, got %#v", got)
+	}
+}
+
+// 阈值经 M365_CONTEXT_SIMILARITY 覆盖，且对非法值回退默认 0.6。
+// APK 证据：默认值取自 0x5be4d0 = 0x3fe3333333333333；
+// FMOV d1,#1.0 + FCMP/B.LS 限定上界为 1.0。
+func TestResolveSimilarThresholdEnvOverride(t *testing.T) {
+	hist := []oaiMsg{
+		{Role: "user", Content: "alpha beta gamma delta"},
+		{Role: "assistant", Content: "epsilon zeta eta theta"},
+	}
+	// 与 hist 相似度 0.5，低于默认 0.6
+	weak := []oaiMsg{{Role: "assistant", Content: "epsilon zeta eta theta"}}
+
+	probe := func(env string, msgs []oaiMsg) ResolveResult {
+		t.Setenv("M365_CONTEXT_SIMILARITY", env)
+		sr := &sessionResolver{
+			sessions:    map[string]sessionBinding{},
+			byExplicit:  map[string]string{},
+			ttl:         2 * time.Hour,
+			contextTTL:  2 * time.Hour,
+			maxSessions: defaultMaxSessions,
+		}
+		sr.persist = &persistStore{flush: func() error { return nil }}
+		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		r.RemoteAddr = "10.0.0.9:5555"
+		r.Header.Set("User-Agent", "probe/1.0")
+		sr.sessions["s1"] = sessionBinding{
+			SessionID:      "s1",
+			IPFingerprint:  clientIPFingerprint(r),
+			ContextHistory: hist,
+			LastUsedAt:     time.Now().UTC(),
+		}
+		return sr.Resolve(r, &oaiReq{Messages: msgs})
 	}
 
-	// Empty request never matches.
-	if id, _ := sr.matchSimilarLocked("fp-a", nil); id != "" {
-		t.Fatalf("empty messages must not match, got %q", id)
+	// 默认 0.6：0.5 分的样本不命中
+	if got := probe("", weak); !got.IsNew {
+		t.Fatalf("default threshold should reject 0.5 sample, got %#v", got)
+	}
+	// 放宽到 0.4：命中
+	if got := probe("0.4", weak); got.IsNew {
+		t.Fatalf("threshold 0.4 should accept 0.5 sample, got %#v", got)
+	}
+	// 非法值一律回退默认 0.6，故仍不命中
+	for _, bad := range []string{"0", "-1", "1.5", "NaN", "abc"} {
+		if got := probe(bad, weak); !got.IsNew {
+			t.Fatalf("invalid threshold %q must fall back to 0.6 and reject, got %#v", bad, got)
+		}
 	}
 }

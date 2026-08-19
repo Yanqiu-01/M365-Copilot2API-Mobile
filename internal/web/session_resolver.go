@@ -5,10 +5,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -313,38 +315,30 @@ func (sr *sessionResolver) Resolve(r *http.Request, body *oaiReq) ResolveResult 
 	}
 
 	// 弱约束兜底：内容不构成严格前缀，但与某个历史高度相似（如客户端本地
-	// 截断了历史）时仍复用该会话。APK 证据：二进制中存在 context_prefix_ 与
-	// context_similar_ 两个 matchedBy 前缀，不存在 context_suffix_。
-	// 此时增量边界未知，HistoryLen 归零，由上层发送全量。
-	similarID, similarPct := sr.matchSimilarLocked(ipFinger, body.Messages)
-	if similarID != "" {
-		sess := sr.sessions[similarID]
-		sess.LastUsedAt = time.Now().UTC()
-		sr.sessions[similarID] = sess
-		sr.persist.markDirty()
-		return ResolveResult{
-			SessionID:      sess.SessionID,
-			ConversationID: sess.ConversationID,
-			AccountID:      sess.AccountID,
-			MatchedBy:      fmt.Sprintf("context_similar_%d", similarPct),
-			IsNew:          false,
-			HistoryLen:     0,
+	// 截断了历史）时仍复用该会话。此时增量边界未知，HistoryLen 归零，
+	// 由上层发送全量。
+	//
+	// APK 证据（tools/apktool strings + 反汇编）：
+	//   Resolve 体内字符串 M365_CONTEXT_SIMILARITY / context_prefix_%d /
+	//   context_similar_%.2f，三者均在 (*sessionResolver).Resolve 内；
+	//   该函数 inline tree 为空，即筛选逻辑直接写在 Resolve 体内，
+	//   APK 中不存在独立的 matchSimilarLocked 方法（函数表 246 与 249
+	//   行段间无空隙）。
+	// 阈值：环境变量优先，默认 0.6，上界 1.0，NaN/越界回退默认。
+	// APK +0x029c ADRP+ADD 取 "M365_CONTEXT_SIMILARITY"（MOVZ x1,#23），
+	// 空或解析失败时经 CBNZ 落到 +0x02b0 ADRP x27,0x5be000 /
+	// LDR d0,[x27,#1232]，即 0x5be4d0 = 0x3fe3333333333333 = 0.6；
+	// +0x02c8 FCMP d0,d0 排 NaN，+0x02d0 FMOV d1,#1.0 与 +0x02d4
+	// FCMP d0,d1 / B.LS 限定上界。
+	threshold := 0.6
+	if raw := strings.TrimSpace(os.Getenv("M365_CONTEXT_SIMILARITY")); raw != "" {
+		if v, err := strconv.ParseFloat(raw, 64); err == nil && !math.IsNaN(v) && v > 0 && v <= 1 {
+			threshold = v
 		}
 	}
-
-	return ResolveResult{IsNew: true}
-}
-
-// matchSimilarLocked 在严格前缀匹配失败后按上下文相似度挑选会话。只在同一
-// IP/UA 指纹下比较，并要求相似度超过阈值，避免跨会话误粘。
-func (sr *sessionResolver) matchSimilarLocked(ipFinger string, messages []oaiMsg) (string, int) {
-	if len(messages) == 0 {
-		return "", 0
-	}
-	const minSimilarity = 0.8
-	bestID := ""
-	bestScore := minSimilarity
-	var bestRecent time.Time
+	bestSimilar := ""
+	bestScore := 0.0
+	var bestSimilarAt time.Time
 	for id, sess := range sr.sessions {
 		if time.Since(sess.LastUsedAt) > sr.contextTTL {
 			continue
@@ -352,15 +346,30 @@ func (sr *sessionResolver) matchSimilarLocked(ipFinger string, messages []oaiMsg
 		if sess.IPFingerprint != ipFinger {
 			continue
 		}
-		score := contextSimilarity(sess.ContextHistory, messages)
-		if score > bestScore || (score == bestScore && sess.LastUsedAt.After(bestRecent)) {
-			bestID, bestScore, bestRecent = id, score, sess.LastUsedAt
+		score := contextSimilarity(sess.ContextHistory, body.Messages)
+		if score < threshold {
+			continue
+		}
+		if score > bestScore || (score == bestScore && sess.LastUsedAt.After(bestSimilarAt)) {
+			bestSimilar, bestScore, bestSimilarAt = id, score, sess.LastUsedAt
 		}
 	}
-	if bestID == "" {
-		return "", 0
+	if bestSimilar != "" {
+		sess := sr.sessions[bestSimilar]
+		sess.LastUsedAt = time.Now().UTC()
+		sr.sessions[bestSimilar] = sess
+		sr.persist.markDirty()
+		return ResolveResult{
+			SessionID:      sess.SessionID,
+			ConversationID: sess.ConversationID,
+			AccountID:      sess.AccountID,
+			MatchedBy:      fmt.Sprintf("context_similar_%.2f", bestScore),
+			IsNew:          false,
+			HistoryLen:     0,
+		}
 	}
-	return bestID, int(bestScore * 100)
+
+	return ResolveResult{IsNew: true}
 }
 
 // matchContextLocked 浠庡叏閮ㄤ細璇濅腑鎵惧埌鍏?contextHistory 涓ユ牸浣滀负娑堟伅鍓嶇紑鐨?
