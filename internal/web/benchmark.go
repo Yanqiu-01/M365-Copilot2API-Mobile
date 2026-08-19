@@ -1,9 +1,12 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path"
 	"sort"
 	"strings"
@@ -229,6 +232,36 @@ func (w *benchWorkspace) setTest(fn func(map[string]string) bool) {
 	w.mu.Lock()
 	w.test = fn
 	w.mu.Unlock()
+}
+
+// callOwnChatCompletions 以进程内自调用方式走一遍 /v1/chat/completions，
+// 使评测复用与外部客户端完全相同的请求路径。
+//
+// APK 证据（tools/apktool，benchmark.go:362-374，1200 字节）：
+//   - 调用图：context.WithTimeout / httptest.NewRequestWithContext /
+//     CanonicalMIMEHeaderKey / mapassign_faststr / makechan / newproc /
+//     selectgo；func1 闭包（369 行）内调用 (*Server).openaiChat 后 closechan；
+//   - +0x0058 MOV x2,x4 表明超时时长来自入参，非常量；
+//   - +0x00d0 method 为 "POST"（ORR 立即数解出长度 4），
+//     +0x00dc path 为 "/v1/chat/completions"（MOVZ x5,#20）；
+//   - +0x019c/+0x01c8 设置 "Content-Type"(12) = "application/json"(16)；
+//   - +0x0284 MOVZ #200 为 recorder 默认状态码；
+//   - +0x034c selectgo 两个 case（ORR 解出 2）：完成与 ctx.Done()；
+//   - 返回三组值：body 切片、状态码、error。
+func (s *Server) callOwnChatCompletions(ctx context.Context, payload []byte, timeout time.Duration) ([]byte, int, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	request := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/chat/completions", bytes.NewReader(payload))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { s.openaiChat(recorder, request); close(done) }()
+	select {
+	case <-done:
+		return recorder.Body.Bytes(), recorder.Code, nil
+	case <-ctx.Done():
+		return nil, 0, ctx.Err()
+	}
 }
 
 // gradeBenchTask 校验受保护输入未被篡改。它不做打分，也不路由任何评分器；
