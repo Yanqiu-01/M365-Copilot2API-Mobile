@@ -215,20 +215,25 @@ func benchTaskCatalog() []benchTask {
 // benchWorkspace is the in-memory task filesystem used by the APK benchmark
 // agent. It deliberately does not expose host commands: benchmark tool calls
 // may only inspect or modify the supplied task artifacts.
+// APK 证据：execute +0x0238 以 ADD x20,x1,#16 从 benchWorkspace 偏移 16
+// 取出 14 个寄存器宽的数据传给 gradeBenchTask，即此处内嵌的 benchTask。
+// APK 的 benchWorkspace 只有 snapshot/testStatus/execute 三个方法，
+// 没有 setTest —— 评分器经内嵌任务的 Grader 字段直接调用。
+// 字段偏移：+136 testsPass、+144 testRuns（execute +0x0358/+0x0368）。
 type benchWorkspace struct {
 	mu        sync.Mutex
+	task      benchTask
 	files     map[string]string
 	testRuns  int
 	testsPass bool
 	wrote     bool
 	steps     int
 	redundant int
-	test      func(map[string]string) bool
 }
 
-func newBenchWorkspace(files map[string]string) *benchWorkspace {
-	workspace := &benchWorkspace{files: make(map[string]string)}
-	for name, content := range files {
+func newBenchWorkspace(task benchTask) *benchWorkspace {
+	workspace := &benchWorkspace{task: task, files: make(map[string]string)}
+	for name, content := range task.Files {
 		if clean, err := cleanBenchPath(name); err == nil {
 			workspace.files[clean] = content
 		}
@@ -271,15 +276,6 @@ func (w *benchWorkspace) testStatus() (passed bool, runs int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.testsPass, w.testRuns
-}
-
-func (w *benchWorkspace) setTest(fn func(map[string]string) bool) {
-	if w == nil {
-		return
-	}
-	w.mu.Lock()
-	w.test = fn
-	w.mu.Unlock()
 }
 
 // recordBenchUsage 把一次评测调用记入用量日志。它被 benchChat 以 defer
@@ -549,18 +545,181 @@ func (w *benchWorkspace) execute(name string, arguments map[string]any) (map[str
 		}
 		return map[string]any{"path": file, "bytes": len(content)}, nil
 	case "run_tests":
-		w.testRuns++
-		if w.test != nil {
-			files := make(map[string]string, len(w.files))
-			for file, content := range w.files {
-				files[file] = content
-			}
-			w.testsPass = w.test(files)
-		} else {
-			w.testsPass = false
+		// APK 在此处先解锁、取快照并校验受保护输入，再调用任务自己的
+		// 评分器（execute +0x0230 snapshot、+0x02c8 gradeBenchTask）。
+		files := make(map[string]string, len(w.files))
+		for file, content := range w.files {
+			files[file] = content
 		}
-		return map[string]any{"passed": w.testsPass, "runs": w.testRuns}, nil
+		if tampered := gradeBenchTask(w.task.Protected, files); tampered != "" {
+			w.testRuns++
+			w.testsPass = false
+			return map[string]any{"passed": false, "runs": w.testRuns, "output": tampered}, nil
+		}
+		passed, total, failures := 0, 0, []string(nil)
+		if w.task.Grader != nil {
+			passed, total, failures = w.task.Grader(files)
+		}
+		w.testRuns++
+		w.testsPass = total > 0 && passed == total
+		// +0x0430 "TESTS PASSED: %d/%d"(19) 经 fmt.Sprintf 生成，
+		// 失败时改用 strings.Join 拼接诊断清单。
+		output := fmt.Sprintf("TESTS PASSED: %d/%d", passed, total)
+		if !w.testsPass {
+			output = strings.Join(failures, "\n")
+		}
+		return map[string]any{"passed": w.testsPass, "runs": w.testRuns, "output": output}, nil
 	default:
 		return nil, fmt.Errorf("unsupported benchmark tool: %s", name)
 	}
+}
+
+// benchMaxSteps 是单任务的工具循环上限。
+// APK 证据：runBenchTask +0x03fc CMP #14，与前端「每项最多 14 步」一致。
+const benchMaxSteps = 14
+
+// benchCodingLoopPrompt 是编程任务追加的闭环要求，逐字节取自 APK
+// runBenchTask +0x0288（0x51e7f4，267 字节）。仅当 category=="coding"
+// 时经 concatstring2 追加到任务描述之后。
+const benchCodingLoopPrompt = "\n\n编程闭环要求：修改代码后必须调用 run_tests。若测试失败，读取失败信息、重新检查相关文件、继续修改并再次运行 run_tests；只有看到 TESTS PASSED 才能结束。不要用文字声称测试通过来代替实际调用。"
+
+// runBenchTask 执行一条评测任务的完整工具循环：装配工作区、逐步与模型
+// 交互、执行受限工具调用，最后交隐藏评分器打分。
+//
+// APK 证据（tools/apktool，benchmark.go:518-644，6000 字节，127 行单体无闭包）。
+//
+// 调用序列：
+//
+//	time.Now → newBenchWorkspace → benchWorkspace.snapshot → gradeBenchTask →
+//	benchmarkStore.logf → benchChat → compactToolResult →
+//	benchWorkspace.testStatus → time.Since → toolArgumentsJSON →
+//	json.Unmarshal → canonicalToolArguments → shouldSuppressCompletedCall →
+//	benchWorkspace.execute
+//
+// 关键立即数与浮点常量：
+//   - +0x03fc CMP #14：步数上限，与前端「每项最多 14 步」一致；
+//   - +0x0250 CMP #6 判 "coding"，命中才追加 267 字节闭环提示；
+//   - +0x0844 MOVZ #104：benchTaskResult 元素大小（growslice）；
+//   - +0x104c LDR d0 与 +0x1054 LDR d1,[0x5be4f0]=100.0 后 FMUL，
+//     即百分比 = netScore*100，对应日志尾部的 %.0f%%；
+//   - +0x138c MOVZ #400 / +0x13a4 MOVZ #300：工具结果截断上限。
+//
+// 日志格式串（地址已核实）：
+//
+//	0x4f947c "[%s] %s，地板分 %d"
+//	0x514455 "[%s] 第 %d 步提前结束，强制进入测试闭环"
+//	0x50cd83 "[%s] 第 %d 步结束回答（%d ms）"
+//	0x5100f7 "最新代码未通过 run_tests 闭环验证"
+//	0x510123 "[%s] 原始 %d/%d，净得分 %d/%d = %.0f%%"
+//
+// +0x08e4 的 testStatus 只在编程任务分支调用，实现前端所述
+// 「编程任务必须在最新代码上通过 run_tests 才计闭环分」。
+func (s *Server) runBenchTask(ctx context.Context, task benchTask, model, effort string) benchTaskResult {
+	started := time.Now()
+	result := benchTaskResult{benchTask: task, Status: "running"}
+	workspace := newBenchWorkspace(task)
+
+	initial := workspace.snapshot()
+	floor, _, _ := task.Grader(initial)
+	result.Floor = floor
+	s.benchmark.logf("[%s] %s，地板分 %d", task.ID, task.Title, floor)
+
+	prompt := task.Detail
+	if task.Category == "coding" {
+		prompt += benchCodingLoopPrompt
+	}
+	messages := []map[string]any{{"role": "user", "content": prompt}}
+
+	for step := 1; step <= benchMaxSteps; step++ {
+		select {
+		case <-ctx.Done():
+			result.Status = "cancelled"
+			result.ElapsedMS = time.Since(started).Milliseconds()
+			return result
+		default:
+		}
+		response, elapsed, err := s.benchChat(ctx, model, effort, messages)
+		if err != nil {
+			result.Status = "error"
+			result.Error = err.Error()
+			result.ElapsedMS = time.Since(started).Milliseconds()
+			return result
+		}
+		choices, _ := response["choices"].([]any)
+		if len(choices) == 0 {
+			result.Status = "error"
+			result.Error = "response contained no choices"
+			result.ElapsedMS = time.Since(started).Milliseconds()
+			return result
+		}
+		choice, _ := choices[0].(map[string]any)
+		message, _ := choice["message"].(map[string]any)
+		content := contentToString(message["content"])
+		calls, _ := message["tool_calls"].([]any)
+
+		if len(calls) == 0 {
+			// 编程任务若还没跑通测试就想收尾，强制再推一轮进入闭环。
+			if passed, runs := workspace.testStatus(); task.Category == "coding" && (!passed || runs == 0) {
+				s.benchmark.logf("[%s] 第 %d 步提前结束，强制进入测试闭环", task.ID, step)
+				messages = append(messages,
+					map[string]any{"role": "assistant", "content": content},
+					map[string]any{"role": "user", "content": benchCodingLoopPrompt})
+				continue
+			}
+			s.benchmark.logf("[%s] 第 %d 步结束回答（%d ms）", task.ID, step, elapsed.Milliseconds())
+			break
+		}
+
+		messages = append(messages, map[string]any{"role": "assistant", "content": content, "tool_calls": calls})
+		for _, raw := range calls {
+			call, _ := raw.(map[string]any)
+			function, _ := call["function"].(map[string]any)
+			name := fmt.Sprint(function["name"])
+			arguments := toolArgumentsJSON(call)
+			var parsed map[string]any
+			_ = json.Unmarshal([]byte(arguments), &parsed)
+			reply := map[string]any{"role": "tool", "tool_call_id": fmt.Sprint(call["id"])}
+			if output, err := workspace.execute(name, parsed); err != nil {
+				reply["content"] = compactToolResult(err.Error(), 300)
+			} else {
+				encoded, _ := json.Marshal(output)
+				reply["content"] = compactToolResult(string(encoded), 400)
+			}
+			messages = append(messages, reply)
+		}
+	}
+
+	final := workspace.snapshot()
+	if tampered := gradeBenchTask(task.Protected, final); tampered != "" {
+		result.Status = "error"
+		result.Error = tampered
+		result.ElapsedMS = time.Since(started).Milliseconds()
+		return result
+	}
+
+	passed, total, failures := task.Grader(final)
+	testsPass, testRuns := workspace.testStatus()
+	net := passed
+	if task.Category == "coding" && !testsPass {
+		failures = append(failures, "最新代码未通过 run_tests 闭环验证")
+		net = floor
+	}
+	if net < floor {
+		net = floor
+	}
+	result.Status = "done"
+	result.Passed = passed
+	result.Total = total
+	result.Failures = failures
+	result.Steps = workspace.steps
+	result.Redundant = workspace.redundant
+	result.WroteFiles = workspace.wrote
+	result.TestsPass = testsPass
+	result.TestRuns = testRuns
+	result.ElapsedMS = time.Since(started).Milliseconds()
+	if total > 0 {
+		result.NetScore = float64(net) / float64(total)
+	}
+	s.benchmark.logf("[%s] 原始 %d/%d，净得分 %d/%d = %.0f%%", task.ID, passed, total, net, total, result.NetScore*100)
+	return result
 }

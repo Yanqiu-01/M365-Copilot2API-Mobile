@@ -34,8 +34,19 @@ func TestCleanBenchPathRejectsEscapeAndNormalizes(t *testing.T) {
 }
 
 func TestBenchWorkspaceSnapshotAndConstrainedExecution(t *testing.T) {
-	workspace := newBenchWorkspace(map[string]string{"a.txt": "one", "nested/b.txt": "two"})
-	workspace.setTest(func(files map[string]string) bool { return files["a.txt"] == "updated" })
+	// APK 的 benchWorkspace 内嵌 benchTask，run_tests 直接调其 Grader，
+	// 没有 setTest 回调（该方法在 APK 中不存在，属既有虚构实现）。
+	probe := benchTask{
+		ID:    "probe",
+		Files: map[string]string{"a.txt": "one", "nested/b.txt": "two"},
+		Grader: func(files map[string]string) (int, int, []string) {
+			if files["a.txt"] == "updated" {
+				return 1, 1, nil
+			}
+			return 0, 1, []string{"a.txt 未更新"}
+		},
+	}
+	workspace := newBenchWorkspace(probe)
 
 	listed, err := workspace.execute("list_files", map[string]any{})
 	if err != nil || !reflect.DeepEqual(listed["files"], []string{"a.txt", "nested/b.txt"}) {
@@ -57,6 +68,9 @@ func TestBenchWorkspaceSnapshotAndConstrainedExecution(t *testing.T) {
 	status, err := workspace.execute("run_tests", map[string]any{})
 	if err != nil || status["passed"] != true || status["runs"] != 1 {
 		t.Fatalf("test status=%#v err=%v", status, err)
+	}
+	if output, _ := status["output"].(string); output != "TESTS PASSED: 1/1" {
+		t.Fatalf("output=%q want \"TESTS PASSED: 1/1\"", output)
 	}
 	passed, runs := workspace.testStatus()
 	if !passed || runs != 1 || !workspace.wrote || workspace.redundant != 1 {
