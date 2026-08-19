@@ -1,0 +1,8 @@
+$ python3 -c "import stats; print(stats.format_report([1,2,3]))"
+  File "stats.py", line 20
+    return f"count={stats['count']} total={stats['total']} mean={stats['mean'].2f}"
+                                                                              ^
+SyntaxError: f-string: invalid syntax
+
+$ python3 -c "import stats; print(stats.summarize([]))"
+ZeroDivisionError: division by zero

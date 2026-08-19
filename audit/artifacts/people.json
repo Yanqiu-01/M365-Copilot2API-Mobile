@@ -1,0 +1,1 @@
+[{"name":"  alice ","age":30},{"name":"BOB","age":25},{"name":"carol","age":25},{"name":"","age":40},{"name":"dave","age":-1},{"name":"erin","age":200},{"name":"frank","age":"x"},"not-a-dict",{"age":22}]
