@@ -34,80 +34,64 @@ e02a07f  audit: 全量审计（三级收敛）
 6067982  revert: 撤销 47b4ee5 / 6529b07 破坏性改动
 ```
 
-## benchmark.go 缺口进度
+## benchmark.go：已全部恢复 ✅
 
-APK 共 767 行，本地曾仅 157 行。六个缺失函数：
+APK 767 行，本地曾仅 157 行。六个缺失函数全部完成，另修正两处虚构。
 
-| 函数 | APK 行段 | 字节 | 状态 |
+| 函数 | APK | 本地 | 行数 |
 |---|---|---|---|
-| `callOwnChatCompletions` | 362-374 | 1200 | ✅ 行数精确 13=13 |
-| `benchChat` | 378-410 | 1600 | ✅ 行数精确 33=33 |
-| `recordBenchUsage` | 421-499 | 1968 | ✅ 语义完整，79 vs 51 |
-| `gradeBenchTask` | 505-515 | 624 | ✅ 行数精确 11=11 |
-| `runBenchTask` | 518-644 | 6000 | ⬜ 依赖 benchTasks 产物 |
-| `startBenchmark` | 649-719 | 1184 | ⬜ 证据已备齐 |
+| `benchTasks` | 64-95 | 102-126 | 32 vs 25 |
+| `recordBenchUsage` | 421-499 | — | 79 vs 51 |
+| `benchChat` | 378-410 | — | 33 = 33 ✅ |
+| `callOwnChatCompletions` | 362-374 | — | 13 = 13 ✅ |
+| `gradeBenchTask` | 505-515 | — | 11 = 11 ✅ |
+| `runBenchTask` | 518-644 | — | 127 vs 108 |
+| `startBenchmark` | 649-719 | — | 71 vs 90 |
 
-## benchTasks 任务产物：已提取（audit/artifacts/）
+函数级差集为空（`benchTaskCatalog` / `benchWeightedAverage` 在产物中
+不可见是因被内联，本地源码存在）。
 
-APK `benchTasks`（64-95，1568 字节，32 行）内含完整任务产物，
-本地同名函数此前只有 ID/Title/Detail/Category 元数据。
+### 修正的虚构实现
 
-**八个产物已逐字节提取，长度与 MOVZ 标注全部精确吻合：**
+1. `benchWorkspace.setTest` —— APK 符号表查无此函数。真实机制是
+   `benchWorkspace` 内嵌 `benchTask`，`execute` 的 run_tests 分支
+   直接调 `w.task.Grader`（证据：execute +0x0238 `ADD x20,x1,#16`
+   取 112 字节内嵌任务、+0x02c8 调 gradeBenchTask）。
+2. `benchTask` 字段顺序 —— 实测为 `+64 Files`、`+72 Grader`、
+   `+80 Protected`，此前把 Grader 与 Protected 位置写反。
 
-| 文件 | 长度 | 值地址 | 归属任务 |
-|---|---|---|---|
-| `inventory.py` | 1724 | `0x522000+469` | bugfix |
-| `stats.py` | 531 | `0x51f000+722` | debug |
-| `run_report.txt` | 387 | `0x51e000+3498` | debug |
-| `users.py` | 544 | `0x51f000+1789` | refactor |
-| `staff.py` | 552 | `0x51f000+2333` | refactor |
-| `people.json` | 203 | `0x51e000+909` | refactor |
-| `ledger.txt` | 144 | `0x51d000+2165` | ledger |
-| `sales.csv` | 320 | `0x51e000+2854` | sales |
+### benchTask 字段布局（实测确证）
 
-### 交叉验证成功
-
-`sales.csv` 独立算出：north=80 south=80 east=70 total=230
-topMonth=2026-02(115) —— 与 `gradeSales` 期望值、以及 rodata 常量池
-`0x5be4e0`-`0x5be4f8` 的 70/80/100/115 完全一致。数据链闭合。
-
-`inventory.py` 含完整 CONTRACT 与五个植入缺陷，与 `gradeInventory`
-的检查项逐条对应（`if qty < 0` 而非 `>= 1`、trail 先于校验、
-比较 `on_hand` 而非 available、release 不设下界）。
-
-`ledger.txt` 十条操作中 4 条无效（TRANSFER B C 200 超额、
-DEPOSIT C -10 负数、WITHDRAW C 0 零额、WITHDRAW B 80 超额），
-与 `gradeLedger` 的「4 拒 6 应用」吻合。
-
-`users.py` / `staff.py` 是近乎重复的两份实现，正是 refactor 任务
-要合并的目标。
-
-### 提取方法（重要）
-
-`benchTasks` 中每个 map 项的模式为：
 ```
-ADRP x4, <值页>  / ADD x4,x4,#<值偏移>  / STR x4,[x0,#0]   ← 前一项的值指针
-ADRP x2, <键页>  / ADD x2,x2,#<键偏移>  / MOVZ x3,#<键长>
-BL mapassign_faststr
-MOVZ x1,#<值长>  / STR x1,[x0,#8]                          ← 当前项的值长度
++0/+8 ID   +16/+24 Title   +32/+40 Detail   +48/+56 Category
++64 Files  +72 Grader      +80 Protected
+元素大小 112；+88..+111 共 24 字节从未被写入，用途无证据，未揣测补入
 ```
-值指针出现在**前一个** `STR x4,[x0,#0]`，值长度在 `mapassign` **之后**。
-错位配对会导致内容截断（我最初把 `staff.py` 的 552 误配成 203）。
 
-**注意**：`+0x007c` 等处 `ADRP x2,0x4b1000` 配 `MOVZ x1,#1724` 看似
-是字符串，实为 Go 链接器按长度分桶的**字符串池**，池内含数十个
-不相关字面量。不可整段当单个字符串使用。
+grader 存储偏移 72/184/296/408/520/632/744/856，相邻差恒 112。
+各任务写入模式与语义逐项吻合：
 
-### algorithm 任务无初始产物（已定论）
+```
+i0 bugfix     +64 +72        i4 shift          +72
+i1 debug      +64 +72 +80    i5 sales      +64 +72 +80
+i2 refactor   +64 +72 +80    i6 ledger     +64 +72 +80
+i3 algorithm      +72        i7 route          +72
+```
 
-全项目 rodata 中 `"intervals.py"` 仅出现在字符串池内，
-不存在对应的内容字面量。`gradeIntervals` 首个检查项为
-「intervals.py 存在」，即要求从零创建。故八个产物即为全部。
+### 评分器路由的真相
 
-### 仍缺
+八个 `grade*` 在 APK 中**无任何 BL 直接调用**，以 funcval 存入
+`.data.rel.ro`（0x136c948-0x136c998），由 `benchTasks` 挂载。
+扫描槽位引用者唯一命中 `benchTasks`，八个引用点顺序与任务顺序一致。
 
-`benchTask` 结构体需扩展产物字段（Files / Protected / 评分器挂载），
-须先确认 APK 侧字段布局，再补全 `benchTasks` 的八项任务定义。
+这解释了 b010d27 的发现：`gradeBenchTask` 只做受保护输入校验，
+不路由评分器 —— 路由在字段挂载，不在函数里。
+
+### 提示词与工具输出闭合
+
+`run_tests` 成功返回 `TESTS PASSED: %d/%d`（execute +0x0430，19 字节），
+正是 267 字节编程闭环提示中「只有看到 TESTS PASSED 才能结束」所指字样。
+两个独立提取的字符串互证。
 
 ## 前端 index.html 是 JSON 契约的权威来源
 

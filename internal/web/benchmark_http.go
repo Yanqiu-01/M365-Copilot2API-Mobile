@@ -102,7 +102,11 @@ func (s *Server) adminBenchmarkRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeOpenAIError(w, http.StatusNotImplemented, "not_implemented", "benchmark executor is not restored yet")
+	if err := s.startBenchmark(body.Model, body.Effort, body.Tasks); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	jsonOut(w, map[string]any{"state": "running"})
 }
 
 func (s *Server) adminBenchmarkStop(w http.ResponseWriter, r *http.Request) {

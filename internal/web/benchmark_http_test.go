@@ -40,27 +40,87 @@ func TestBenchmarkHTTPStatusAndStop(t *testing.T) {
 }
 
 func TestBenchmarkRunValidatesAPKRequestShape(t *testing.T) {
-	s := benchmarkHTTPServer()
-	for _, body := range []string{
-		`{"model":"gpt-5.6-reasoning","effort":"max","tasks":["bugfix"]}`,
-		`{"model":"","effort":"","tasks":[]}`,
-	} {
-		w := httptest.NewRecorder()
-		s.adminBenchmarkRun(w, httptest.NewRequest(http.MethodPost, "/api/admin/benchmark/run", strings.NewReader(body)))
-		if w.Code != http.StatusNotImplemented {
-			t.Fatalf("body=%s status=%d response=%s", body, w.Code, w.Body.String())
-		}
-	}
+	// 非法请求一律 400，且不得启动任何评测。
 	for _, body := range []string{
 		`{"effort":"unsupported"}`,
 		`{"tasks":["not-a-task"]}`,
 		`{`,
 	} {
+		s := benchmarkHTTPServer()
 		w := httptest.NewRecorder()
 		s.adminBenchmarkRun(w, httptest.NewRequest(http.MethodPost, "/api/admin/benchmark/run", strings.NewReader(body)))
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("invalid body=%s status=%d response=%s", body, w.Code, w.Body.String())
 		}
+		if state := s.benchmark.snapshot().State; state == "running" {
+			t.Fatalf("invalid body=%s must not start a run", body)
+		}
+	}
+
+	// 合法请求接受并进入 running；随后立刻停止，避免测试期真跑评测。
+	for _, body := range []string{
+		`{"model":"gpt-5.6-reasoning","effort":"max","tasks":["bugfix"]}`,
+		`{"model":"","effort":"","tasks":[]}`,
+	} {
+		s := benchmarkHTTPServer()
+		w := httptest.NewRecorder()
+		s.adminBenchmarkRun(w, httptest.NewRequest(http.MethodPost, "/api/admin/benchmark/run", strings.NewReader(body)))
+		if w.Code != http.StatusOK {
+			t.Fatalf("body=%s status=%d response=%s", body, w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), `"state":"running"`) {
+			t.Fatalf("body=%s response=%s", body, w.Body.String())
+		}
+		s.benchmark.stop()
+	}
+}
+
+// 已在运行时重入必须被拒绝，错误文案取自 APK
+// startBenchmark +0x030c "已有评测在运行"(21 字节)。
+func TestBenchmarkRunRejectsReentry(t *testing.T) {
+	s := benchmarkHTTPServer()
+	defer s.benchmark.stop()
+
+	if err := s.startBenchmark("gpt-5.6-reasoning", "max", []string{"shift"}); err != nil {
+		t.Fatalf("first start failed: %v", err)
+	}
+	err := s.startBenchmark("gpt-5.6-reasoning", "max", []string{"shift"})
+	if err == nil {
+		t.Fatal("second start must be rejected while running")
+	}
+	if err.Error() != "已有评测在运行" {
+		t.Errorf("error=%q want 已有评测在运行", err.Error())
+	}
+
+	w := httptest.NewRecorder()
+	s.adminBenchmarkRun(w, httptest.NewRequest(http.MethodPost, "/api/admin/benchmark/run",
+		strings.NewReader(`{"model":"gpt-5.6-reasoning","effort":"max"}`)))
+	if w.Code != http.StatusConflict {
+		t.Errorf("reentry via HTTP status=%d want 409", w.Code)
+	}
+}
+
+// 运行 ID 采用 APK 的 "20060102T150405Z" 格式（startBenchmark +0x011c）。
+func TestBenchmarkRunIDFormat(t *testing.T) {
+	s := benchmarkHTTPServer()
+	if err := s.startBenchmark("gpt-5.6-reasoning", "max", []string{"route"}); err != nil {
+		t.Fatal(err)
+	}
+	current := s.benchmark.snapshot().Current
+	s.benchmark.stop()
+	// 形如 20260819T071500Z：8 位日期 + T + 6 位时间 + Z。
+	if len(current) != 16 || current[8] != 'T' || current[15] != 'Z' {
+		t.Errorf("run id=%q does not match 20060102T150405Z", current)
+	}
+}
+
+// 未知任务 ID 不应被静默忽略成"跑全部"。
+func TestBenchmarkRunUnknownTaskSelectsNothing(t *testing.T) {
+	s := benchmarkHTTPServer()
+	err := s.startBenchmark("gpt-5.6-reasoning", "max", []string{"no-such-task"})
+	if err == nil {
+		s.benchmark.stop()
+		t.Fatal("unknown task id must not start a run")
 	}
 }
 

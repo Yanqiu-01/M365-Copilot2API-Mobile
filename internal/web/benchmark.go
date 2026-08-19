@@ -22,31 +22,41 @@ import (
 // benchTask 描述一条评测任务。前四个字段参与 JSON 序列化，供前端渲染；
 // 后三个是执行期数据，不出现在 API 响应中。
 //
-// APK 证据：元素大小 112 字节，字段偏移由 benchTasks 的 STR [x2,#N]
-// 序列（N = i*112 + 元素内偏移）确定：
+// APK 字段布局（元素大小 112 字节，由 benchTasks 的 STR 偏移实测）：
 //
-//	+0/+8 ID、+16/+24 Title、+32/+40 Detail、+48/+56 Category
-//	+64 Files、+72 Protected、+80 Grader
+//	+0/+8 ID   +16/+24 Title   +32/+40 Detail   +48/+56 Category
+//	+64 Files  +72 Grader      +80 Protected
 //
-// 实测点：i=0 的 +64/+72（+0x00e8/+0x00f4）、i=1 的 +176/+184/+192、
-// grader 槽位 i=2→304、i=3→408、i=4→520，相邻差恒为 112。
+// grader 存储偏移序列 72/184/296/408/520/632/744/856，相邻差恒为 112，
+// 故元素内偏移为 72。各任务的写入模式与语义逐项吻合：
 //
-// 前端 index.html 只引用 id/title/detail/category，与此处 json 标签一致，
-// 证明后三个字段确为 json:"-"。
+//	i0 bugfix     +64 +72          （无受保护文件）
+//	i1 debug      +64 +72 +80
+//	i2 refactor   +64 +72 +80
+//	i3 algorithm      +72          （无初始产物）
+//	i4 shift          +72
+//	i5 sales      +64 +72 +80
+//	i6 ledger     +64 +72 +80
+//	i7 route          +72
+//
+// +88..+111 这 24 字节在 benchTasks 中从未被写入，为零值字段，
+// 其用途暂无证据可判，故不揣测补入。
+//
+// 前端 index.html 只引用 id/title/detail/category，与此处 json 标签一致。
 type benchTask struct {
 	ID       string `json:"id"`
 	Title    string `json:"title"`
 	Detail   string `json:"detail"`
 	Category string `json:"category"`
 
-	// Files 是交给模型的初始工作区内容。
+	// Files 是交给模型的初始工作区内容（元素内偏移 +64）。
 	Files map[string]string `json:"-"`
-	// Protected 记录不得被篡改的输入，由 gradeBenchTask 校验。
-	Protected map[string]string `json:"-"`
-	// Grader 是该任务的隐藏评分器，由 benchTasks 直接挂载。
-	// APK 中八个 grade* 函数均无 BL 直接调用，而是以 funcval 形式
-	// 存入 .data.rel.ro（0x136c948-0x136c998），经此字段间接调用。
+	// Grader 是该任务的隐藏评分器（+72）。APK 中八个 grade* 函数均无 BL
+	// 直接调用，而是以 funcval 存入 .data.rel.ro（0x136c948-0x136c998），
+	// 由 benchTasks 挂载到此字段后间接调用。
 	Grader func(map[string]string) (int, int, []string) `json:"-"`
+	// Protected 记录不得被篡改的输入（+80），由 gradeBenchTask 校验。
+	Protected map[string]string `json:"-"`
 }
 
 type benchTaskResult struct {
@@ -722,4 +732,112 @@ func (s *Server) runBenchTask(ctx context.Context, task benchTask, model, effort
 	}
 	s.benchmark.logf("[%s] 原始 %d/%d，净得分 %d/%d = %.0f%%", task.ID, passed, total, net, total, result.NetScore*100)
 	return result
+}
+
+// startBenchmark 校验参数、抢占 running 状态，并在后台跑完整轮评测。
+//
+// APK 证据（benchmark.go:649-719，1184 字节，含 6 个闭包）：
+//   - 调用图 Mutex.lockSlow / time.Now / time.Time.Format /
+//     Mutex.unlockSlow / fmt.Errorf / strings.TrimSpace；
+//   - +0x030c "已有评测在运行"(21, @0x4f6cda) 经 fmt.Errorf 返回：
+//     已在运行时拒绝重入；
+//   - +0x011c 时间格式 "20060102T150405Z"(16, @0x4e1913) 用于运行 ID；
+//   - func1(666-743) 是主循环：遍历 benchTasks、按 ids 过滤、
+//     调 runBenchTask、以 benchWeightedAverage 汇总；
+//   - func1 +0x00e0 len=89 "开始评测：模型 %s，思考强度 %s（编程占 %.0f%%，纯 Go 隐藏评分器）"
+//   - func1 +0x07f8 len=66 "评测结束：编程 %.0f%%，推理 %.0f%%，加权总分 %.0f%%"
+//   - func1 +0x0464 整数化比较 "cancelled"、+0x0534 CMP #6 判 "coding"、
+//     +0x0454 CMP #9 判 "reasoning"、+0x0480 CMP #100 为百分比换算；
+//   - func1.1(667-681) 每任务状态更新，仅在 State 仍为 "running" 时写入
+//     （+0x0144 CMP #7、+0x0178 CMP #103 即 'g'，为 "running" 的长度与尾字节）。
+func (s *Server) startBenchmark(model, effort string, ids []string) error {
+	normalizedEffort, err := benchmarkEffort(effort)
+	if err != nil {
+		return err
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return fmt.Errorf("model is required")
+	}
+
+	selected := map[string]bool{}
+	for _, id := range ids {
+		selected[strings.TrimSpace(id)] = true
+	}
+	tasks := make([]benchTask, 0, len(benchTasks()))
+	for _, task := range benchTasks() {
+		if len(selected) == 0 || selected[task.ID] {
+			tasks = append(tasks, task)
+		}
+	}
+	if len(tasks) == 0 {
+		return fmt.Errorf("no benchmark task selected")
+	}
+
+	if s.benchmark == nil {
+		s.benchmark = &benchmarkStore{}
+	}
+	s.benchmark.mu.Lock()
+	if s.benchmark.run.State == "running" {
+		s.benchmark.mu.Unlock()
+		return fmt.Errorf("已有评测在运行")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	started := time.Now().UTC()
+	s.benchmark.run = benchmarkRun{
+		State:        "running",
+		Model:        model,
+		Effort:       normalizedEffort,
+		StartedAt:    started,
+		Cancellation: cancel,
+		// 运行 ID 采用 APK 的 "20060102T150405Z" 格式。
+		Current: started.Format("20060102T150405Z"),
+	}
+	s.benchmark.mu.Unlock()
+
+	codingCount := 0
+	for _, task := range tasks {
+		if task.Category == "coding" {
+			codingCount++
+		}
+	}
+	codingShare := 0.0
+	if len(tasks) > 0 {
+		codingShare = float64(codingCount) / float64(len(tasks)) * 100
+	}
+	s.benchmark.logf("开始评测：模型 %s，思考强度 %s（编程占 %.0f%%，纯 Go 隐藏评分器）",
+		model, normalizedEffort, codingShare)
+
+	go func() {
+		defer cancel()
+		for _, task := range tasks {
+			s.benchmark.update(func(run *benchmarkRun) {
+				if run.State == "running" {
+					run.Current = task.ID
+				}
+			})
+			result := s.runBenchTask(ctx, task, model, normalizedEffort)
+			s.benchmark.update(func(run *benchmarkRun) {
+				if run.State != "running" {
+					return
+				}
+				run.Tasks = append(run.Tasks, result)
+			})
+			if result.Status == "cancelled" {
+				break
+			}
+		}
+		s.benchmark.update(func(run *benchmarkRun) {
+			if run.State == "running" {
+				run.State = "done"
+			}
+			run.Current = ""
+			run.FinishedAt = time.Now().UTC()
+			run.Cancellation = nil
+		})
+		final := s.benchmark.snapshot()
+		s.benchmark.logf("评测结束：编程 %.0f%%，推理 %.0f%%，加权总分 %.0f%%",
+			final.CodingScore*100, final.ReasoningScore*100, final.Average*100)
+	}()
+	return nil
 }
