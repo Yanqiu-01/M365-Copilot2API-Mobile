@@ -251,6 +251,20 @@ func (s *Server) adminMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// 本机只读诊断豁免：原生 DiagActivity 固定访问 http://127.0.0.1:4141，
+		// 而它把会话 cookie 存在实例字段里，页面一关就丢，导致每次进诊断页都
+		// 要重新登录、退出再进就什么都看不到。这些端点只读且不含凭据（帧内容
+		// 已脱敏），仅对回环地址放行，对外访问仍需管理员会话。
+		if isLoopbackRequest(r) && isReadOnlyDiagnosticPath(r.URL.Path) && r.Method == http.MethodGet {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// 捕获开关也需本机豁免：否则诊断页登录态一丢就再也开不了捕获，
+		// 只读放行也就失去意义。它只切换一个布尔量，不返回任何凭据。
+		if isLoopbackRequest(r) && isCaptureToggle(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if s.adminPassword == "" {
 			http.Error(w, `{"error":{"message":"administrator password is not configured","type":"configuration_error"}}`, http.StatusServiceUnavailable)
 			return
@@ -268,6 +282,42 @@ func (s *Server) adminMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isLoopbackRequest 判断请求是否来自本机回环地址。
+func isLoopbackRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	return net.ParseIP(host).IsLoopback()
+}
+
+// isCaptureToggle 是仅切换帧捕获开关的端点。它不读写凭据、不返回敏感数据，
+// 因此与只读诊断端点一并对本机放行。
+func isCaptureToggle(path string) bool {
+	switch path {
+	case "/api/admin/debug/router-frames/toggle",
+		"/api/admin/debug/wire/toggle":
+		return true
+	}
+	return false
+}
+
+// isReadOnlyDiagnosticPath 列出可对本机免密开放的只读诊断端点。
+// 只包含 GET 语义、内容已脱敏、且不返回令牌或密码的路径。
+func isReadOnlyDiagnosticPath(path string) bool {
+	switch path {
+	case "/api/stages",
+		"/api/admin/debug/router-frames",
+		"/api/admin/debug/wire",
+		"/api/admin/account-health":
+		return true
+	}
+	return false
 }
 
 func secureAdminCookie(r *http.Request) bool {

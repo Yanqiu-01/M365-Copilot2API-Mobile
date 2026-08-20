@@ -729,6 +729,33 @@ func (w *benchWorkspace) execute(name string, arguments map[string]any) (map[str
 	}
 }
 
+// logRouterEvidence 把最近一次路由采集摊进评测运行日志。
+//
+// 诊断页（原生 DiagActivity）需要单独登录、且退出即丢会话，实际很难取到证据。
+// 评测本身是进程内自调用，路由帧就在同一进程的 routerFrames 里，直接读出来
+// 写进运行日志最可靠 —— 用户在评测页就能看到上游返回了什么、路由有没有抽到
+// 工具调用。仅在「模型没给工具调用」时输出，避免正常轮次刷屏。
+func (s *Server) logRouterEvidence(taskID string, step int) {
+	if !currentSettings().CaptureRouterFrames {
+		s.benchmark.logf("[%s]   （未开启「捕获路由原始帧」，无法给出路由证据）", taskID)
+		return
+	}
+	groups := routerFrameSnapshot()
+	if len(groups) == 0 {
+		s.benchmark.logf("[%s]   路由采集为空：本步未产生路由轮", taskID)
+		return
+	}
+	latest := groups[len(groups)-1]
+	s.benchmark.logf("[%s]   路由 %s/%s：prompt %d 字节，正文 %d 字节，思考 %d 字节",
+		taskID, latest.RequestID, latest.Stage, latest.PromptLen, latest.TextLen, latest.ReasoningLen)
+	if latest.Cause != "" {
+		s.benchmark.logf("[%s]   路由错误：%s", taskID, trimForLog(latest.Cause))
+	}
+	if latest.Text != "" {
+		s.benchmark.logf("[%s]   上游原文：%s", taskID, compactToolResult(latest.Text, 600))
+	}
+}
+
 // benchMaxSteps 是单任务的工具循环上限。
 // APK 证据：runBenchTask +0x03fc CMP #14，与前端「每项最多 14 步」一致。
 const benchMaxSteps = 14
@@ -802,6 +829,10 @@ func (s *Server) runBenchTask(ctx context.Context, task benchTask, model, effort
 		}
 		response, elapsed, err := s.benchChat(ctx, model, effort, messages)
 		if err != nil {
+			// 失败必须落进运行日志：此前直接 return，任务卡片只显示
+			// 「1 步 · 未写任何文件」，运行日志里一行都没有，无从判断是
+			// 上游失败、超时，还是路由没抽到工具调用。
+			s.benchmark.logf("[%s] 第 %d 步请求失败：%s", task.ID, step, trimForLog(err.Error()))
 			result.Status = "error"
 			result.Error = err.Error()
 			result.ElapsedMS = time.Since(started).Milliseconds()
@@ -809,6 +840,7 @@ func (s *Server) runBenchTask(ctx context.Context, task benchTask, model, effort
 		}
 		choices, _ := response["choices"].([]any)
 		if len(choices) == 0 {
+			s.benchmark.logf("[%s] 第 %d 步响应无 choices", task.ID, step)
 			result.Status = "error"
 			result.Error = "response contained no choices"
 			result.ElapsedMS = time.Since(started).Milliseconds()
@@ -818,6 +850,25 @@ func (s *Server) runBenchTask(ctx context.Context, task benchTask, model, effort
 		message, _ := choice["message"].(map[string]any)
 		content := contentToString(message["content"])
 		calls, _ := message["tool_calls"].([]any)
+
+		// 逐步留痕：调用数、回复长度、以及无调用时模型实际说了什么。
+		// 没有这一行就无法区分「模型不肯调用工具」与「调用在网关侧被丢掉」。
+		if len(calls) > 0 {
+			names := make([]string, 0, len(calls))
+			for _, raw := range calls {
+				call, _ := raw.(map[string]any)
+				fn, _ := call["function"].(map[string]any)
+				names = append(names, fmt.Sprint(fn["name"]))
+			}
+			s.benchmark.logf("[%s] 第 %d 步工具调用 %d 个：%s（%d ms）",
+				task.ID, step, len(calls), strings.Join(names, ", "), elapsed.Milliseconds())
+		} else {
+			s.benchmark.logf("[%s] 第 %d 步无工具调用，回复 %d 字：%s",
+				task.ID, step, len([]rune(content)), trimForLog(content))
+			// 无调用是最需要证据的时刻：把本步的路由帧直接摊进运行日志，
+			// 免去「开捕获 → 进诊断页 → 再登录」那条极易丢失状态的链路。
+			s.logRouterEvidence(task.ID, step)
+		}
 
 		if len(calls) == 0 {
 			// 编程任务若还没跑通测试就想收尾，强制再推一轮进入闭环。
@@ -856,9 +907,11 @@ func (s *Server) runBenchTask(ctx context.Context, task benchTask, model, effort
 			_ = json.Unmarshal([]byte(arguments), &parsed)
 			reply := map[string]any{"role": "tool", "tool_call_id": fmt.Sprint(call["id"])}
 			if output, err := workspace.execute(name, parsed); err != nil {
+				s.benchmark.logf("[%s]   %s 执行失败：%s", task.ID, name, trimForLog(err.Error()))
 				reply["content"] = compactToolResult(err.Error(), 300)
 			} else {
 				encoded, _ := json.Marshal(output)
+				s.benchmark.logf("[%s]   %s -> %s", task.ID, name, compactToolResult(string(encoded), 160))
 				reply["content"] = compactToolResult(string(encoded), 400)
 			}
 			messages = append(messages, reply)
