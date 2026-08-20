@@ -27,8 +27,8 @@ fi
 NEW_PKG=com.m365.gateway3
 OLD_PKG=com.m365.gateway
 NEW_LABEL='M365 网关 v3 修复版'
-VERSION_CODE=78
-VERSION_NAME=2.24.19
+VERSION_CODE=79
+VERSION_NAME=2.24.20
 # 密钥库必须固定在仓库内，不能落在输出目录：此前默认 $OUT/...，而每个
 # 版本用独立输出目录，keytool 因此每次都新生成一份密钥，导致每版签名都不
 # 一样，升级时必须先卸载。签名一致才能覆盖安装并保留数据。

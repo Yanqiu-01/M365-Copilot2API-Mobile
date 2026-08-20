@@ -322,7 +322,7 @@ func gradeInventory(files map[string]string) (int, int, []string) {
 	// Defect 1: the lower-bound guard must reject zero. The original source had
 	// `qty < 0`; accept the APK-observed repaired forms.
 	report.total++
-	if containsAny(addBody, "qty < 1", "qty <= 0", "not isinstance(qty, int) or qty < 1") {
+	if rejectsNonPositiveQty(addBody) {
 		report.passed++
 	} else {
 		report.failures = append(report.failures, "缺陷1 add 拒绝 qty=0")
@@ -367,6 +367,40 @@ func gradeInventory(files map[string]string) (int, int, []string) {
 	}
 
 	return report.tally()
+}
+
+// rejectsNonPositiveQty 判断 add 的下界守卫是否把 0 也挡住。
+//
+// 原始缺陷是 `if qty < 0`（放过了 0）。正确修法在语义上只有一种 —— 要求
+// qty >= 1 —— 但写法很多：qty < 1、qty <= 0、not qty >= 1、1 > qty、
+// 先判类型再判范围等。此前按字面枚举三种，其余正确写法一律被判为未修复
+// （实测「not qty >= 1」「1 > qty」都会误判），bugfix 因此长期停在 6/7。
+//
+// 这里改为归一化后做语义匹配：去掉空格、消解 not、再看是否等价于
+// 「qty 小于 1」或「qty 不大于 0」。
+func rejectsNonPositiveQty(body string) bool {
+	if body == "" {
+		return false
+	}
+	// 归一化：去空格并统一大小写，便于比较。
+	compact := strings.ToLower(strings.Join(strings.Fields(body), ""))
+
+	// not qty>=1 / not(qty>=1) 等价于 qty<1；not qty>0 等价于 qty<=0。
+	compact = strings.ReplaceAll(compact, "not(", "not")
+	for _, pair := range [][2]string{
+		{"notqty>=1", "qty<1"},
+		{"notqty>0", "qty<=0"},
+		{"notqty>=1)", "qty<1"},
+	} {
+		compact = strings.ReplaceAll(compact, pair[0], pair[1])
+	}
+
+	// 直接形式与反向书写（1>qty、0>=qty）都接受。
+	return containsAny(compact,
+		"qty<1", "qty<=0",
+		"1>qty", "0>=qty",
+		"qty<int(1)",
+	)
 }
 
 // gradeDebug 校验 debug 任务：修复 stats.py 的 f-string 语法错误与
