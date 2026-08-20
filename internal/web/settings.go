@@ -90,6 +90,7 @@ func defaultRuntimeSettings() runtimeSettings {
 		Authority: os.Getenv("M365_AUTHORITY"), RedirectURI: os.Getenv("M365_REDIRECT_URI"), Scope: os.Getenv("M365_SCOPE"),
 		ModelMappings:    append([]modelMapping(nil), defaultModelMappings...),
 		ToolPlanningMode: toolPlanningMode(os.Getenv("M365_TOOL_PLANNING_MODE")),
+		ClientProfile:    "office",
 	}
 }
 func settingsPath() string {

@@ -108,10 +108,14 @@ want = {
     'maxOutputTokens': 16384,
     'chatTimeoutSeconds': 600,
     'imageTimeoutSeconds': 180,
+    'toolPlanningMode': 'router',
+    'clientProfile': 'office',
 }
 for key, value in want.items():
     if settings.get(key) != value:
         raise SystemExit(f'设置 {key}={settings.get(key)!r}, want {value!r}')
+if settings.get('clientProfile') != 'office':
+    raise SystemExit(f'clientProfile={settings.get("clientProfile")!r}, want office')
 want_tones = [
     'Gpt_5_2_Chat', 'Gpt_5_2_Reasoning', 'Gpt_5_3_Chat', 'Gpt_5_3_Reasoning',
     'Gpt_5_4_Chat', 'Gpt_5_4_Reasoning', 'Gpt_5_5_Chat', 'Gpt_5_5_Reasoning',

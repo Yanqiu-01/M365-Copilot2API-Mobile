@@ -17,6 +17,9 @@ func TestDefaultRuntimeSettingsMatchOriginalAPK(t *testing.T) {
 	if got.MaxToolCallsPerTurn != 32 || got.MaxToolRounds != 512 || got.ContextWindow != 262144 || got.MaxOutputTokens != 16384 || got.ChatTimeoutSeconds != 600 || got.ImageTimeoutSeconds != 180 {
 		t.Fatalf("original APK defaults not restored: %#v", got)
 	}
+	if got.ClientProfile != "office" {
+		t.Fatalf("client profile=%q, want office", got.ClientProfile)
+	}
 	if len(got.ModelMappings) != 3 {
 		t.Fatalf("model mappings=%#v", got.ModelMappings)
 	}

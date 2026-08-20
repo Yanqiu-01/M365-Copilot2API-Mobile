@@ -56,8 +56,10 @@ func codexModelMessages() map[string]any {
 	}
 }
 
-// gatewayModels is the static catalog recovered from the APK. The three
-// operator-configurable aliases are appended by configuredModelSpecs.
+// gatewayModels is the eleven-entry built-in public catalog recovered from the
+// APK. Runtime model mappings replace a matching built-in entry or append an
+// alias; the APK's three default mappings therefore produce its default
+// fourteen-entry directory.
 var gatewayModels = []modelSpec{
 	{ID: "gpt-5.2", Owner: "microsoft-365", Tools: true},
 	{ID: "gpt-5.2-reasoning", Owner: "microsoft-365", Tools: true},

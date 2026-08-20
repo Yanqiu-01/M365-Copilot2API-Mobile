@@ -103,6 +103,33 @@ func TestStaticCatalogSurvivesAbsentMappings(t *testing.T) {
 	}
 }
 
+func TestConfiguredAliasesReplaceOnlyAliasSlotsAsOriginalAPK(t *testing.T) {
+	settings := originalCatalogSettings()
+	settings.ModelMappings = []modelMapping{
+		{PublicModel: "custom-alpha", UpstreamTone: "Gpt_5_6_Reasoning", DisplayName: "Custom Alpha", DefaultReasoningLevel: "xhigh"},
+		{PublicModel: "custom-beta", UpstreamTone: "Gpt_5_6_Reasoning", DisplayName: "Custom Beta", DefaultReasoningLevel: "xhigh"},
+		{PublicModel: "custom-gamma", UpstreamTone: "Gpt_5_6_Reasoning", DisplayName: "Custom Gamma", DefaultReasoningLevel: "xhigh"},
+	}
+	models := modelCatalogForSettings(settings)
+	want := []string{
+		"gpt-5.2", "gpt-5.2-reasoning", "gpt-5.3", "gpt-5.3-reasoning",
+		"gpt-5.4", "gpt-5.4-reasoning", "gpt-5.5", "gpt-5.5-reasoning",
+		"gpt-5.6-reasoning", "claude-sonnet", "claude-sonnet-reasoning",
+		"custom-alpha", "custom-beta", "custom-gamma",
+	}
+	if len(models) != len(want) {
+		t.Fatalf("custom catalog count=%d, want %d", len(models), len(want))
+	}
+	for i, id := range want {
+		if models[i]["id"] != id {
+			t.Fatalf("custom model[%d]=%#v, want %q", i, models[i], id)
+		}
+	}
+	if models[11]["display_name"] != "Custom Alpha" || models[12]["display_name"] != "Custom Beta" || models[13]["display_name"] != "Custom Gamma" {
+		t.Fatalf("custom alias metadata=%#v", models[11:])
+	}
+}
+
 func TestInternalToneRoutingDoesNotChangePublicModelNames(t *testing.T) {
 	mappings := append([]modelMapping(nil), defaultModelMappings...)
 	cases := []struct {
