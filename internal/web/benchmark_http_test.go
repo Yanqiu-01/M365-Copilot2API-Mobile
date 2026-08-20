@@ -184,8 +184,21 @@ func TestAccountHealthHTTPContract(t *testing.T) {
 	s := benchmarkHTTPServer()
 	w := httptest.NewRecorder()
 	s.adminAccountHealth(w, httptest.NewRequest(http.MethodGet, "/api/admin/account-health", nil))
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"accounts"`) || !strings.Contains(w.Body.String(), `"retryAttempts"`) || !strings.Contains(w.Body.String(), `"maxConcurrentChats"`) {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	// 原 APK 实测字段：accounts / coolingDown / cooldownBaseMs /
+	// cooldownMaxMs / retryAttempts，不含 maxConcurrentChats。
+	body := w.Body.String()
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, body)
+	}
+	for _, key := range []string{`"accounts"`, `"coolingDown"`, `"cooldownBaseMs"`, `"cooldownMaxMs"`, `"retryAttempts"`} {
+		if !strings.Contains(body, key) {
+			t.Errorf("missing %s: %s", key, body)
+		}
+	}
+	for _, key := range []string{`"maxConcurrentChats"`, `"accountConcurrency"`, `"cooldownCount"`} {
+		if strings.Contains(body, key) {
+			t.Errorf("upstream-only field %s must not be exposed: %s", key, body)
+		}
 	}
 }
 

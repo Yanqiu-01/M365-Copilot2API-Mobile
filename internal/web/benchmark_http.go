@@ -36,12 +36,14 @@ func (s *Server) adminAccountHealth(w http.ResponseWriter, r *http.Request) {
 			accounts = append(accounts, entry)
 		}
 	}
+	// 字段集对齐原版 /api/admin/account-health：coolingDown 计数与
+	// 冷却窗口毫秒值，不暴露上游的 accountConcurrency/maxConcurrentChats。
 	jsonOut(w, map[string]any{
-		"accounts":           accounts,
-		"cooldownCount":      len(cooldowns),
-		"retryAttempts":      routerRetryAttempts(),
-		"maxConcurrentChats": maxConcurrentChats(),
-		"accountConcurrency": s.accountConcurrency.Snapshot(),
+		"accounts":       accounts,
+		"coolingDown":    len(cooldowns),
+		"cooldownBaseMs": accountCooldownStep.Milliseconds(),
+		"cooldownMaxMs":  accountCooldownMax.Milliseconds(),
+		"retryAttempts":  routerRetryAttempts(),
 	})
 }
 
@@ -52,10 +54,14 @@ func (s *Server) adminBenchmark(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// 原 APK 实测还返回 pythonOk 与 runtime：评分器是纯 Go 实现，
+	// 不依赖外部 Python，因此固定为 true / "pure-go"。
 	jsonOut(w, map[string]any{
-		"run":     s.benchmark.snapshot(),
-		"tasks":   benchTaskCatalog(),
-		"efforts": benchmarkReasoningEfforts,
+		"run":      s.benchmark.snapshot(),
+		"tasks":    benchTaskCatalog(),
+		"efforts":  benchmarkReasoningEfforts,
+		"pythonOk": true,
+		"runtime":  "pure-go",
 	})
 }
 

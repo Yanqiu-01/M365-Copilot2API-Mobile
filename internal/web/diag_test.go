@@ -129,12 +129,22 @@ func TestLivenessAndStageHandlers(t *testing.T) {
 	s := &Server{}
 	live := httptest.NewRecorder()
 	s.handleLiveness(live, httptest.NewRequest(http.MethodGet, "/api/live", nil))
-	if live.Code != http.StatusOK || !strings.Contains(live.Body.String(), `"status":"ok"`) || !strings.Contains(live.Body.String(), `"chatSlots"`) {
+	// 原 APK 实测 /api/live: status "alive" + chat 计数对象。
+	if live.Code != http.StatusOK || !strings.Contains(live.Body.String(), `"status":"alive"`) || !strings.Contains(live.Body.String(), `"chat":{`) {
 		t.Fatalf("liveness=%d %s", live.Code, live.Body.String())
+	}
+	for _, key := range []string{`"active"`, `"limit"`, `"peak"`, `"rejected"`, `"total"`, `"sysBytes"`, `"numGC"`, `"uptimeSeconds"`, `"stageLogPath"`} {
+		if !strings.Contains(live.Body.String(), key) {
+			t.Errorf("liveness missing %s: %s", key, live.Body.String())
+		}
 	}
 	stages := httptest.NewRecorder()
 	s.handleStageLog(stages, httptest.NewRequest(http.MethodGet, "/api/stages", nil))
-	if stages.Code != http.StatusOK || !strings.Contains(stages.Body.String(), `"enabled":false`) {
+	// 原 APK 实测 /api/stages: {lines, path} + 未创建时的 note。
+	if stages.Code != http.StatusOK || !strings.Contains(stages.Body.String(), `"lines"`) || !strings.Contains(stages.Body.String(), `"path"`) {
 		t.Fatalf("stages=%d %s", stages.Code, stages.Body.String())
+	}
+	if strings.Contains(stages.Body.String(), `"enabled"`) || strings.Contains(stages.Body.String(), `"max_bytes"`) {
+		t.Errorf("stages must not expose upstream-only fields: %s", stages.Body.String())
 	}
 }

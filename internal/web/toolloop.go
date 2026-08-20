@@ -210,52 +210,6 @@ func isToolRefusal(text string) bool {
 	return false
 }
 
-// isUnavailableModelReply detects the short refusal ChatHub can return when a
-// tone/model is present in the public catalog but is not enabled for the
-// current tenant. It must be handled as an upstream failure, never shown as a
-// successful assistant completion or a passing model probe.
-func isUnavailableModelReply(text string) bool {
-	text = strings.TrimSpace(text)
-	if text == "" || len([]rune(text)) > 240 {
-		return false
-	}
-	low := strings.ToLower(text)
-	// Rate-limit notices are handled by the ChatHub transport/account-health
-	// path. Keep them out of this model-route classifier even when they contain
-	// the generic "unable to respond" wording.
-	for _, phrase := range []string{
-		"too many requests",
-		"this many requests",
-		"rate limit",
-		"rate-limit",
-		"太多请求",
-		"请求过多",
-		"无法响应这么多请求",
-	} {
-		if strings.Contains(low, strings.ToLower(phrase)) {
-			return false
-		}
-	}
-	for _, phrase := range []string{
-		"抱歉，我无法响应",
-		"抱歉，我无法回答",
-		"抱歉，无法响应",
-		"抱歉，我不能响应",
-		"抱歉，我不能回答",
-		"i'm sorry, i can't respond",
-		"i'm sorry, i cannot respond",
-		"i'm unable to respond",
-		"i cannot respond to this request",
-		"i can't respond to this request",
-		"unable to respond to this request",
-		"temporarily unable to respond",
-	} {
-		if strings.Contains(low, strings.ToLower(phrase)) {
-			return true
-		}
-	}
-	return false
-}
 
 var sandboxHallucinationPatterns = []string{
 	"I can run that for you",

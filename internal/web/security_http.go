@@ -38,10 +38,11 @@ func (s *Server) rootPage(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return
 	}
+	// 原 APK 实测 /login 与 / 返回同一份 index.html（逐字节相同，102579
+	// 字节）：登录态由前端 JS 依据 /api/admin/session 切换，没有独立的
+	// 登录页路由。上游那句 name = "login.html" 的分支在二开版里已被删除，
+	// 恢复时误将其带回，导致 /login 只返回 10611 字节的空壳页面。
 	name := "web/index.html"
-	if r.URL.Path == "/login" {
-		name = "web/login.html"
-	}
 	f, err := os.Open(name)
 	if err != nil {
 		http.Error(w, "web interface unavailable", http.StatusInternalServerError)

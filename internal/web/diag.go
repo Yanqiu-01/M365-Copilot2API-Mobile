@@ -25,6 +25,11 @@ var (
 	chatSlotsMu sync.Mutex
 	chatSlots   chan struct{}
 	chatSlotN   int
+	// 原版 /api/live 的 chat 对象含 peak/rejected/total 累计量，
+	// 只看 channel 长度无法还原，需要独立计数。
+	chatSlotPeak     int
+	chatSlotRejected uint64
+	chatSlotTotal    uint64
 )
 
 type inflightRequest struct {
@@ -160,14 +165,18 @@ func inflightSnapshot() []inflightRequest {
 func liveness() map[string]any {
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
+	// 字段集对齐原版：status "alive"、chat 计数对象、numGC/sysBytes/
+	// uptimeSeconds/stageLogPath；不使用上游的 chatSlots/inflight_count/now。
 	return map[string]any{
-		"status":         "ok",
-		"now":            time.Now().UTC().Format(time.RFC3339Nano),
+		"status":         "alive",
+		"chat":           chatSlotStats(),
 		"inflight":       inflightSnapshot(),
-		"inflight_count": len(inflightSnapshot()),
 		"heapAllocBytes": memory.HeapAlloc,
+		"sysBytes":       memory.Sys,
+		"numGC":          memory.NumGC,
 		"goroutines":     runtime.NumGoroutine(),
-		"chatSlots":      map[string]any{"limit": maxConcurrentChats(), "inflight": chatSlotInflight()},
+		"uptimeSeconds":  int(time.Since(startedAt).Seconds()),
+		"stageLogPath":   diagPath(),
 	}
 }
 
@@ -184,14 +193,22 @@ func (s *Server) handleStageLog(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// 原版返回 {lines, path}，日志未创建时附 note；
+	// 不返回上游的 enabled/max_bytes/inflight/log。
 	payload := map[string]any{
-		"enabled":   diagEnabled(),
-		"path":      diagPath(),
-		"max_bytes": diagMaxBytes(),
-		"inflight":  inflightSnapshot(),
+		"path":  diagPath(),
+		"lines": []string{},
 	}
 	if data, err := os.ReadFile(diagPath()); err == nil {
-		payload["log"] = string(data)
+		lines := []string{}
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.TrimSpace(line) != "" {
+				lines = append(lines, line)
+			}
+		}
+		payload["lines"] = lines
+	} else {
+		payload["note"] = "stage log not created yet"
 	}
 	jsonOut(w, payload)
 }
@@ -220,6 +237,12 @@ func acquireChatSlot(ctx context.Context) (func(), error) {
 	slots := currentChatSlots()
 	select {
 	case slots <- struct{}{}:
+		chatSlotsMu.Lock()
+		chatSlotTotal++
+		if n := len(slots); n > chatSlotPeak {
+			chatSlotPeak = n
+		}
+		chatSlotsMu.Unlock()
 		var once sync.Once
 		return func() {
 			once.Do(func() {
@@ -230,6 +253,9 @@ func acquireChatSlot(ctx context.Context) (func(), error) {
 			})
 		}, nil
 	case <-ctx.Done():
+		chatSlotsMu.Lock()
+		chatSlotRejected++
+		chatSlotsMu.Unlock()
 		return nil, ctx.Err()
 	}
 }
@@ -244,6 +270,20 @@ func releaseChatSlot() {
 
 func chatSlotInflight() int {
 	return len(currentChatSlots())
+}
+
+// chatSlotStats 复刻原版 /api/live 的 chat 对象。
+func chatSlotStats() map[string]any {
+	active := len(currentChatSlots())
+	chatSlotsMu.Lock()
+	defer chatSlotsMu.Unlock()
+	return map[string]any{
+		"active":   active,
+		"limit":    chatSlotN,
+		"peak":     chatSlotPeak,
+		"rejected": chatSlotRejected,
+		"total":    chatSlotTotal,
+	}
 }
 
 func acquireChatSlotOrError(ctx context.Context) (func(), error) {

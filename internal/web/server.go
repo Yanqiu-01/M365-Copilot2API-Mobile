@@ -453,15 +453,15 @@ func jsonOut(w http.ResponseWriter, v any) {
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	list := s.tokens.List()
+	// 原版 /api/health 不含 accountConcurrency。
 	jsonOut(w, map[string]any{
-		"status":             "ok",
-		"auth":               []string{"pkce"},
-		"chat":               "chathub",
-		"clientId":           auth.ClientID(),
-		"scope":              auth.Scope(),
-		"tokenCache":         s.tokens.Path(),
-		"accountCount":       len(list),
-		"accountConcurrency": s.accountConcurrency.Snapshot(),
+		"status":       "ok",
+		"auth":         []string{"pkce"},
+		"chat":         "chathub",
+		"clientId":     auth.ClientID(),
+		"scope":        auth.Scope(),
+		"tokenCache":   s.tokens.Path(),
+		"accountCount": len(list),
 	})
 }
 
@@ -996,11 +996,6 @@ func (s *Server) adminModelTest(w http.ResponseWriter, r *http.Request) {
 	ms := time.Since(start).Milliseconds()
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "m365_error", upstreamError(err))
-		return
-	}
-	if isUnavailableModelReply(res.Text) {
-		log.Printf("[model-test] unavailable model=%q tone=%q reply=%q", b.Model, tone, trimForLog(res.Text))
-		writeOpenAIError(w, http.StatusBadGateway, "model_unavailable", "the requested model is not available for this tenant")
 		return
 	}
 	jsonOut(w, map[string]any{"ok": true, "model": b.Model, "reply": sanitizePublicAssistantTextForModel(res.Text, b.Model), "latency_ms": ms})
@@ -1702,15 +1697,6 @@ APPLICATION_REQUEST_AND_EVIDENCE:
 	if err != nil {
 		s.accountPool.MarkFailure(acc.ID, err, rateLimitCooldown)
 		writeUpstreamError(w, err)
-		return
-	}
-	// A short generic refusal is ChatHub's successful-transport response for a
-	// tone that this tenant cannot use. Do not turn it into a normal OpenAI
-	// completion (and, in particular, do not let a benchmark score it as an
-	// answer). This is a route/model condition, not an account failure.
-	if !body.Stream && isUnavailableModelReply(res.Text) {
-		log.Printf("[model-route] unavailable model=%q tone=%q reply=%q", body.Model, tone, trimForLog(res.Text))
-		writeOpenAIError(w, http.StatusBadGateway, "model_unavailable", "the requested model is not available for this tenant")
 		return
 	}
 	s.accountPool.MarkSuccess(acc.ID)

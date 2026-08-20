@@ -95,15 +95,16 @@ func TestRouterFramesHandlers(t *testing.T) {
 	if get.Code != http.StatusOK {
 		t.Fatalf("get status=%d body=%s", get.Code, get.Body.String())
 	}
+	// 原 APK 实测键名为 captures（并带固定 note），而非上游的 frames/keep。
 	var payload struct {
-		Enabled bool               `json:"enabled"`
-		Keep    int                `json:"keep"`
-		Frames  []routerFrameGroup `json:"frames"`
+		Enabled  bool               `json:"enabled"`
+		Note     string             `json:"note"`
+		Captures []routerFrameGroup `json:"captures"`
 	}
 	if err := json.Unmarshal(get.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if !payload.Enabled || payload.Keep != 3 || len(payload.Frames) != 1 {
+	if !payload.Enabled || len(payload.Captures) != 1 || payload.Note == "" {
 		t.Fatalf("payload=%#v", payload)
 	}
 

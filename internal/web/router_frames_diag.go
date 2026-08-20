@@ -126,10 +126,15 @@ func (s *Server) handleRouterFrames(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// 原版返回 {captures, enabled, note}，键名与提示文案均固定。
+	captures := routerFrameSnapshot()
+	if captures == nil {
+		captures = []routerFrameGroup{}
+	}
 	jsonOut(w, map[string]any{
-		"enabled": currentSettings().CaptureRouterFrames,
-		"keep":    routerFrameKeep(),
-		"frames":  routerFrameSnapshot(),
+		"enabled":  currentSettings().CaptureRouterFrames,
+		"captures": captures,
+		"note":     "在「设置」页开启「捕获路由原始帧」后重新发一次请求即可采集",
 	})
 }
 

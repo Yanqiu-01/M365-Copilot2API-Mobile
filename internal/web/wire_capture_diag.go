@@ -13,10 +13,16 @@ func (s *Server) handleWireFrames(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return
 	}
+	// 原版附带脱敏说明，且 frames 始终是数组。
+	frames := chathub.WireFrames()
+	if frames == nil {
+		frames = []chathub.WireFrame{}
+	}
 	jsonOut(w, map[string]any{
 		"enabled":  chathub.WireCaptureEnabled(),
 		"identity": chathub.ActiveIdentitySummary(),
-		"frames":   chathub.WireFrames(),
+		"frames":   frames,
+		"note":     "access token redacted; prompt text not captured",
 	})
 }
 

@@ -1433,11 +1433,11 @@ async function loadBenchmark(){
         const md=await api('/api/admin/models');
         const models=md.data||[];
         const ids=models.map(m=>m&&m.id).filter(Boolean);
-        const preferred=String(d.defaultModel||'gpt-5.6-reasoning');
+        const preferred='gpt-5.6-reasoning';
         mSel.innerHTML=ids.map(id=>`<option value="${esc(id)}"${id===preferred?' selected':''}>${esc(id)}</option>`).join('');
         if(!mSel.options.length)mSel.innerHTML=`<option value="${esc(preferred)}">${esc(preferred)}</option>`;
       }catch(e){
-        const preferred=String(d.defaultModel||'gpt-5.6-reasoning');
+        const preferred='gpt-5.6-reasoning';
         mSel.innerHTML=`<option value="${esc(preferred)}">${esc(preferred)}</option>`;
       }
     }
