@@ -42,7 +42,6 @@ User request and evidence:
 %s`, defs, mode, rules, prompt)
 }
 
-
 // normalizeToolDirective 把全角冒号统一成半角。模型用中文作答时常输出
 // "CALL_TOOL：name(...)"，此前一律解析失败并落到修复轮。全角冒号占 3 字节、
 // 半角占 1 字节，长度会变，因此规范化后的文本要整体用于后续下标运算。
@@ -71,134 +70,36 @@ func hasTrailingNoToolMarker(text string) bool {
 	return strings.Contains(strings.ToUpper(tail), "NO_TOOL_NEEDED")
 }
 
+// parseModelToolDecision 抽取模型的路由决策。
+//
+// 实现委托给 tool_decision_extract.go 的统一抽取器：先枚举全部候选（不问
+// 它被什么包裹），再统一校验并取最后一个有效的。这样新增一种输出包装方式
+// 时无需在此新增分支 —— 此前按模型逐个打补丁（gpt-5.6 的 CALL_TOOL 前缀、
+// gpt-5.5 的思考期花括号、中文全角冒号……）每换一个模型就要返工一次。
+//
+// 返回值 parsed 表示「模型给出了可理解的决策」，与是否选中工具无关：
+// NO_TOOL_NEEDED 和空 calls 都是 parsed=true、calls 为空。
 func parseModelToolDecision(text string, tools []map[string]any, choice any) ([]detectedToolCall, bool) {
-	text = normalizeToolDirective(strings.TrimSpace(text))
-	// CALL_TOOL: 指令按 APK 规则出现在回复末尾，前面可以有任意长度的
-	// 思考过程。因此从后往前找最后一处 CALL_TOOL:，而不是要求它位于
-	// 整段文本开头 —— 后者会让所有推理档位的路由输出解析失败。
-	if idx := lastToolDirectiveIndex(text); idx >= 0 {
-		rest := strings.TrimSpace(text[idx:])
-		if colon := strings.Index(rest, ":"); colon > 0 {
-			rest = strings.TrimSpace(rest[colon+1:])
-			// 指令占一行；截到行尾避免把后续解释文字带进参数。
-			if nl := strings.IndexAny(rest, "\r\n"); nl >= 0 {
-				rest = strings.TrimSpace(rest[:nl])
-			}
-			start := strings.Index(rest, "(")
-			end := strings.LastIndex(rest, ")")
-			if start > 0 && end > start {
-				name := strings.TrimSpace(rest[:start])
-				argsStr := rest[start+1 : end]
-				var args map[string]any
-				if json.Unmarshal([]byte(argsStr), &args) == nil && toolChoiceAllows(choice, name) {
-					fn := toolFunction(name, tools)
-					if fn != nil && schemaValid(args, fn) == nil {
-						b, _ := json.Marshal(args)
-						return []detectedToolCall{{ID: callID(name, string(b), 0), Type: toolType(name, tools), Name: name, Arguments: b}}, true
-					}
-				}
-			}
-		}
+	text = normalizeDecisionText(strings.TrimSpace(text))
+	if text == "" {
+		return nil, false
 	}
-	// NO_TOOL_NEEDED 同样按 APK 规则出现在末尾。只在尾部窗口内认定，
-	// 避免思考过程中提到该标记（例如「这里不该回 NO_TOOL_NEEDED」）
-	// 被误判成「无需调用工具」而丢掉真正的工具调用。
-	if hasTrailingNoToolMarker(text) {
+
+	// 1) CALL_TOOL: name(<json>) —— 路由轮的主格式。
+	if calls, ok := selectDecision(extractDirectiveCandidates(text), tools, choice); ok {
+		return calls, true
+	}
+
+	// 2) {"calls":[...]} —— 修复轮与 required 重试轮要求的格式。
+	//    信封本身即为一次完整决策，因此保留其中全部合法调用。
+	if candidates, found := extractEnvelopeCandidates(text); found {
+		return selectAllValid(candidates, tools, choice), true
+	}
+
+	// 3) 明确表示无需工具。放在最后：只有在没抽到任何可用调用时才采纳，
+	//    避免「先说不需要、又给出指令」的回复被判成不调用。
+	if hasTrailingNoTool(text) {
 		return nil, true
 	}
-	// Fallback: JSON 形状 {"calls":[...]}（修复轮与 required 重试轮要求的格式）。
-	//
-	// 不能只取第一个 { 到最后一个 }：推理档位的模型会在思考里提到 JSON
-	// 片段（例如「需要返回形如 {"calls":[...]} 的结构」、「参数应该是
-	// {"path": "..."} 这种形状」），首个 { 落在思考中，整段截取因此既不是
-	// 合法 JSON、也不含 calls 键，一律 parsed=false —— 进修复轮，修复轮
-	// 同样带思考、同样失败，最终报 502 model returned an invalid tool
-	// routing decision。gpt-5.5 在评测中每次必报正是这条路径。
-	//
-	// 改为扫描全部候选对象，从最后一个 { 往前找第一个能解析且含 calls
-	// 的片段：真正的决策位于回复末尾，思考中的示例在前面。
-	for _, candidate := range jsonObjectCandidates(text) {
-		var probe map[string]json.RawMessage
-		if json.Unmarshal([]byte(candidate), &probe) != nil {
-			continue
-		}
-		if _, ok := probe["calls"]; !ok {
-			continue
-		}
-		var envelope struct {
-			Calls []struct {
-				Name      string         `json:"name"`
-				Arguments map[string]any `json:"arguments"`
-			} `json:"calls"`
-		}
-		if json.Unmarshal([]byte(candidate), &envelope) != nil {
-			continue
-		}
-		out := make([]detectedToolCall, 0, len(envelope.Calls))
-		for i, c := range envelope.Calls {
-			fn := toolFunction(c.Name, tools)
-			if fn == nil || c.Arguments == nil || !toolChoiceAllows(choice, c.Name) || schemaValid(c.Arguments, fn) != nil {
-				continue
-			}
-			b, _ := json.Marshal(c.Arguments)
-			out = append(out, detectedToolCall{ID: callID(c.Name, string(b), i), Type: toolType(c.Name, tools), Name: c.Name, Arguments: b})
-		}
-		return out, true
-	}
 	return nil, false
-}
-
-// jsonObjectCandidates 返回文本中所有花括号平衡的顶层对象片段，按结束位置
-// 从后往前排列。字符串字面量内的花括号与转义不参与配对。
-func jsonObjectCandidates(text string) []string {
-	// 去掉代码围栏标记，保留内容本身。
-	text = strings.ReplaceAll(text, "```json", "```")
-	cleaned := make([]byte, 0, len(text))
-	for i := 0; i < len(text); i++ {
-		if strings.HasPrefix(text[i:], "```") {
-			i += 2
-			continue
-		}
-		cleaned = append(cleaned, text[i])
-	}
-	body := string(cleaned)
-
-	var out []string
-	var starts []int
-	inString := false
-	escaped := false
-	for i := 0; i < len(body); i++ {
-		ch := body[i]
-		if inString {
-			switch {
-			case escaped:
-				escaped = false
-			case ch == '\\':
-				escaped = true
-			case ch == '"':
-				inString = false
-			}
-			continue
-		}
-		switch ch {
-		case '"':
-			inString = true
-		case '{':
-			starts = append(starts, i)
-		case '}':
-			if n := len(starts); n > 0 {
-				start := starts[n-1]
-				starts = starts[:n-1]
-				// 只收集顶层对象，嵌套片段不单独作为候选。
-				if len(starts) == 0 {
-					out = append(out, body[start:i+1])
-				}
-			}
-		}
-	}
-	// 真正的决策在末尾，优先尝试靠后的候选。
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
-	}
-	return out
 }
