@@ -787,7 +787,7 @@ if (response.output_text) {
 <script>
 const $=id=>document.getElementById(id);
 const pages={dashboard:'仪表盘',usage:'用量',accounts:'账号',apikeys:'API Keys',conversations:'对话管理',proxies:'代理池',benchmark:'能力评测',settings:'设置'};
-let pkceTimer=null;
+let pkceTimer=null,loadedSettings={},restartFields=[];
 
 function showNotice(msg,type='info'){
   const el=$('notice');
@@ -817,6 +817,12 @@ async function loadSettings(){
   try{
     const d=await api('/api/admin/settings');
     const s=d.settings||{};
+    // 记下服务端当前值与需要重启的字段：保存时只提交真正被改动的项。
+    // listenAddress 等字段一旦提交，Java 层会重启 Go 子进程，而管理员
+    // 会话只存在于进程内存（server.go 的 adminSessions map），重启即
+    // 全部失效 —— 表现为「点进设置/捕获页再退出来就没有登录状态」。
+    loadedSettings=s;
+    restartFields=d.restartRequiredFields||[];
     if($('setListen'))$('setListen').value=s.listenAddress||'';
     if($('setTimeout'))$('setTimeout').value=s.chatTimeoutSeconds||'';
     if($('setImageTimeout'))$('setImageTimeout').value=s.imageTimeoutSeconds||'';
@@ -1574,24 +1580,28 @@ async function loadWireFrames(){
 }
 
 async function saveSettings(){  try{
-    const listen=$('setListen').value.trim();
-    const timeout=$('setTimeout').value.trim();
-    const imgTimeout=$('setImageTimeout')?.value.trim();
-    const ctxWindow=$('setContextWindow')?.value.trim();
-    const maxOutput=$('setMaxOutput')?.value.trim();
-    const maxRounds=$('setMaxToolRounds')?.value.trim();
-    const maxCalls=$('setMaxToolCalls')?.value.trim();
-    const body={captureRouterFrames:!!$('setCapture')?.checked};
-    if($('setProfile'))body.clientProfile=$('setProfile').value;
-    if(listen)body.listenAddress=listen;
-    if(timeout)body.chatTimeoutSeconds=parseInt(timeout);
-    if(imgTimeout)body.imageTimeoutSeconds=parseInt(imgTimeout);
-    if(ctxWindow)body.contextWindow=parseInt(ctxWindow);
-    if(maxOutput)body.maxOutputTokens=parseInt(maxOutput);
-    if(maxRounds)body.maxToolRounds=parseInt(maxRounds);
-    if(maxCalls)body.maxToolCallsPerTurn=parseInt(maxCalls);
+    // 只提交与服务端当前值不同的字段。此前无条件提交 listenAddress
+    // （输入框里预填着当前值，if(listen) 恒真），每次保存都被判为「改了
+    // 需要重启的字段」，Go 子进程随之重启、内存中的管理员会话全部失效。
+    const body={};
+    const put=(key,val)=>{ if(val!==undefined&&val!==loadedSettings[key])body[key]=val; };
+    const num=el=>{ const raw=$(el)?.value.trim(); if(!raw)return undefined; const n=parseInt(raw); return Number.isFinite(n)?n:undefined; };
+    put('captureRouterFrames',!!$('setCapture')?.checked);
+    if($('setProfile'))put('clientProfile',$('setProfile').value);
+    const listen=$('setListen')?.value.trim();
+    if(listen)put('listenAddress',listen);
+    put('chatTimeoutSeconds',num('setTimeout'));
+    put('imageTimeoutSeconds',num('setImageTimeout'));
+    put('contextWindow',num('setContextWindow'));
+    put('maxOutputTokens',num('setMaxOutput'));
+    put('maxToolRounds',num('setMaxToolRounds'));
+    put('maxToolCallsPerTurn',num('setMaxToolCalls'));
+    if(!Object.keys(body).length){showNotice('没有需要保存的改动','info');return;}
+    const touched=Object.keys(body).filter(k=>restartFields.includes(k));
+    if(touched.length&&!confirm('修改 '+touched.join('、')+' 需要重启服务，重启后需要重新登录。继续？'))return;
     await api('/api/admin/settings',{method:'PUT',body:JSON.stringify(body)});
-    showNotice('设置已保存','success');
+    Object.assign(loadedSettings,body);
+    showNotice(touched.length?'已保存，服务重启后请重新登录':'设置已保存','success');
   }catch(e){showNotice(e.message,'error');}
 }
 

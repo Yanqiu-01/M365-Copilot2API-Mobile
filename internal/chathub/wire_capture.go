@@ -2,11 +2,13 @@ package chathub
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // WireFrame is the sanitized diagnostic record exposed by /api/admin/debug/wire.
@@ -86,6 +88,12 @@ func recordWire(kind, handshakeURL, payload string) {
 	wireCapture.Unlock()
 }
 
+// wireFrameMaxBytes 是单帧保留上限。超限时截断而非丢弃 —— 评测与任何带
+// 工具 schema 的请求 payload 都远超此值（实测 12856 字节），此前「超限即
+// 返回空串」使捕获在最需要它的场景下永远为空，只能看到 payloadBytes 而
+// 看不到任何内容。
+const wireFrameMaxBytes = 4096
+
 // sanitizeWirePayload retains the first SignalR record for diagnostics while
 // recursively redacting credential fields. Invalid JSON is intentionally not
 // retained: the APK returned an empty sanitized payload on parse failure.
@@ -100,8 +108,16 @@ func sanitizeWirePayload(payload string) string {
 	}
 	redactWireValue(value)
 	encoded, err := json.Marshal(value)
-	if err != nil || len(encoded) > 4096 {
+	if err != nil {
 		return ""
+	}
+	if len(encoded) > wireFrameMaxBytes {
+		// 在 UTF-8 边界上截断，附标记说明被截断及原始长度。
+		cut := wireFrameMaxBytes
+		for cut > 0 && !utf8.RuneStart(encoded[cut]) {
+			cut--
+		}
+		return string(encoded[:cut]) + fmt.Sprintf("…[truncated, %d bytes total]", len(encoded))
 	}
 	return string(encoded)
 }

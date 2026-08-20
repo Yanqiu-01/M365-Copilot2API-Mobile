@@ -1485,10 +1485,16 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if routeErr != nil {
-				msg := upstreamError(routeErr)
+				// 失败帧必须先记录再返回：此前 recordRouterFrames 只在
+				// 成功路径上调用，用户开了「捕获路由原始帧」复现失败后，
+				// 诊断里依然空无一物 —— 恰恰是最需要证据的场景丢了证据。
+				recordRouterFrames(requestID, "router", routePrompt, routeRes.Text, routeErr)
+				// 带阶段标注，便于区分握手被拒 / 读超时 / 中途断流。
+				msg := upstreamStageError("router", routeErr)
 				if IsRateLimited(routeErr) {
 					msg = "upstream is rate limiting; try again shortly"
 				}
+				log.Printf("[req-trace] id=%s stage=router_error err=%v", requestID, routeErr)
 				writeOpenAIError(w, http.StatusBadGateway, "router_error", msg)
 				return
 			}
