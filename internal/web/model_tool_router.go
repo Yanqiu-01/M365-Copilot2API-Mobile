@@ -9,11 +9,19 @@ import (
 func modelToolRouterPrompt(prompt string, tools []map[string]any, choice any) string {
 	defs, _ := json.Marshal(tools)
 	mode := normalizedToolChoiceMode(choice)
-	rules := `- If a tool is needed, respond with: CALL_TOOL: tool_name({"arg1":"value1"})
-- If no tool is needed, respond with: NO_TOOL_NEEDED
-- Only use tools from the available list above
-- Validate all arguments against the tool's schema
-- Do not invent tools that are not in the list`
+	// 规则文案逐字取自原 APK rodata（0x51e… 段，以 "- Decide the next
+	// concrete action" 起、"Do not invent tools." 止）。关键是
+	// "end with EXACTLY one line" —— 推理档位的模型会先输出思考过程，
+	// 指令只出现在末尾。此前恢复成 "respond with:"，配合解析侧的
+	// HasPrefix 检查，等于要求整段回复必须以 CALL_TOOL: 开头，推理
+	// tone 必然解析失败（纯文本 tone 直接给指令所以能过）。
+	rules := `- Decide the next concrete action. Prefer the most specific tool (a document/skill tool beats a raw shell).
+- If a tool is needed, end with EXACTLY one line: CALL_TOOL: tool_name({"arg1":"value1"})
+- If no tool is needed, end with: NO_TOOL_NEEDED
+- When a tool writes a file, its text argument must contain the finished deliverable itself. Never pass the instructions, the brief, or a description of what to write; the user reads the file, not the request.
+- Never build a document by shelling out. Do not use cat/tee heredocs or echo redirects to create content; call the file-writing tool or the dedicated skill instead.
+- workspace_shell is for short operational commands (ls, tests, git, package installs), not for authoring.
+- Only use tools from the available list. Validate arguments against the schema. Do not invent tools.`
 	// Multi-turn: completed tool evidence (tool[...], tool_calls:) was already
 	// acted upon, so re-invoking those tools would duplicate work.
 	if strings.Contains(prompt, "tool_calls:") || strings.Contains(prompt, "tool[call_") {
@@ -34,13 +42,41 @@ User request and evidence:
 %s`, defs, mode, rules, prompt)
 }
 
+
+// lastToolDirectiveIndex 返回最后一个 CALL_TOOL: 指令的起始下标（大小写
+// 不敏感），没有则返回 -1。推理模型的指令位于思考之后，必须取最后一处：
+// 思考过程里可能复述过 "CALL_TOOL:" 字样，取第一处会解析到错误的参数。
+func lastToolDirectiveIndex(text string) int {
+	lower := strings.ToLower(text)
+	return strings.LastIndex(lower, "call_tool:")
+}
+
+// hasTrailingNoToolMarker 判断 NO_TOOL_NEEDED 是否作为收尾指令出现。
+// 取末尾若干字符做窗口：指令按规则独占最后一行，而思考正文里的提及
+// 通常位于更靠前的位置。
+func hasTrailingNoToolMarker(text string) bool {
+	trimmed := strings.TrimRight(strings.TrimSpace(text), "。.!！`\"'\u201d\u3002")
+	const window = 64
+	tail := trimmed
+	if len(tail) > window {
+		tail = tail[len(tail)-window:]
+	}
+	return strings.Contains(strings.ToUpper(tail), "NO_TOOL_NEEDED")
+}
+
 func parseModelToolDecision(text string, tools []map[string]any, choice any) ([]detectedToolCall, bool) {
 	text = strings.TrimSpace(text)
-	// Try the new natural language format first: CALL_TOOL: name({...})
-	if strings.HasPrefix(text, "CALL_TOOL:") || strings.HasPrefix(text, "call_tool:") {
-		parts := strings.SplitN(text, ":", 2)
-		if len(parts) == 2 {
-			rest := strings.TrimSpace(parts[1])
+	// CALL_TOOL: 指令按 APK 规则出现在回复末尾，前面可以有任意长度的
+	// 思考过程。因此从后往前找最后一处 CALL_TOOL:，而不是要求它位于
+	// 整段文本开头 —— 后者会让所有推理档位的路由输出解析失败。
+	if idx := lastToolDirectiveIndex(text); idx >= 0 {
+		rest := strings.TrimSpace(text[idx:])
+		if colon := strings.Index(rest, ":"); colon > 0 {
+			rest = strings.TrimSpace(rest[colon+1:])
+			// 指令占一行；截到行尾避免把后续解释文字带进参数。
+			if nl := strings.IndexAny(rest, "\r\n"); nl >= 0 {
+				rest = strings.TrimSpace(rest[:nl])
+			}
 			start := strings.Index(rest, "(")
 			end := strings.LastIndex(rest, ")")
 			if start > 0 && end > start {
@@ -57,7 +93,10 @@ func parseModelToolDecision(text string, tools []map[string]any, choice any) ([]
 			}
 		}
 	}
-	if strings.Contains(text, "NO_TOOL_NEEDED") || strings.Contains(text, "no_tool_needed") {
+	// NO_TOOL_NEEDED 同样按 APK 规则出现在末尾。只在尾部窗口内认定，
+	// 避免思考过程中提到该标记（例如「这里不该回 NO_TOOL_NEEDED」）
+	// 被误判成「无需调用工具」而丢掉真正的工具调用。
+	if hasTrailingNoToolMarker(text) {
 		return nil, true
 	}
 	// Fallback: try the old JSON format
