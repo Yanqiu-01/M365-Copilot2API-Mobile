@@ -62,3 +62,34 @@ func TestObservationalToolStillFilteredWithoutMutation(t *testing.T) {
 		t.Error("状态未改变时重复读取同一文件应被剔除")
 	}
 }
+
+// EVIDENCE_LEDGER 的提示语必须逐字符合 APK 原文。
+//
+// 原版明确允许 read/inspect/check/test 在状态变化后重复，只禁止参数完全相同
+// 的变更类调用。恢复期误写成「任何已完成的调用都不得重复」，模型于是在需要
+// 再写一次文件或再跑一次 run_tests 时回 NO_TOOL_NEEDED —— 而网关同时又在推
+// 它「必须调用 run_tests」，两条指令自相矛盾，评测因此空转到步数耗尽。
+func TestRouterContextHintMatchesAPK(t *testing.T) {
+	ledger := buildAgentLedger([]oaiMsg{
+		{Role: "assistant", ToolCalls: []map[string]any{{
+			"id": "c1", "type": "function",
+			"function": map[string]any{"name": "run_tests", "arguments": "{}"},
+		}}},
+		{Role: "tool", ToolCallID: "c1", Content: "TESTS FAILED"},
+	})
+	hint := ledger.RouterContext()
+
+	const want = "Use only this compact evidence. Do not repeat a completed mutating call with identical arguments. Read, inspect, check, and test calls may be repeated after workspace state changes."
+	if !contains(hint, want) {
+		t.Errorf("router context hint 与 APK 原文不符:\n%s", hint)
+	}
+	// 自撰的绝对禁令不得再出现。
+	for _, forbidden := range []string{
+		"A completed call is final evidence",
+		"do not issue the same name and arguments again",
+	} {
+		if contains(hint, forbidden) {
+			t.Errorf("hint 仍含自撰禁令 %q，会阻止模型继续调用工具", forbidden)
+		}
+	}
+}

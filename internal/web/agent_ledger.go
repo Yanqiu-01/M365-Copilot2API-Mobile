@@ -144,7 +144,15 @@ func (l agentLedger) RouterContext() string {
 		RepeatedCall bool           `json:"repeated_call"`
 	}
 	b, _ := json.Marshal(compact{l.Completed, l.Pending, l.RepeatedCall})
-	hint := "Use only this compact evidence. A completed call is final evidence; do not issue the same name and arguments again."
+	// 逐字取自原 APK rodata。关键是后半句：read/inspect/check/test 在工作区
+	// 状态变化后允许重复，只禁止「参数完全相同的变更类调用」。
+	//
+	// 恢复期误写成「A completed call is final evidence; do not issue the same
+	// name and arguments again.」—— 等于告诉模型任何调用都不得重复。于是它
+	// 在需要再写一次文件、再跑一次 run_tests 时选择回 NO_TOOL_NEEDED，网关
+	// 又反复推它「必须调用 run_tests」，指令自相矛盾。实测表现为 bugfix 跑满
+	// 14 步、algorithm 连续三次「提前结束」，最终罚到地板分。
+	hint := "Use only this compact evidence. Do not repeat a completed mutating call with identical arguments. Read, inspect, check, and test calls may be repeated after workspace state changes."
 	if l.RepeatedFailure {
 		hint += " The same call failed repeatedly; change strategy instead of retrying unchanged."
 	}
@@ -214,27 +222,30 @@ func filterCompletedCalls(calls []detectedToolCall, l agentLedger) []detectedToo
 			out = append(out, c)
 			continue
 		}
-		// 已完成过：只有在状态已改变、且该工具属于验证/只读类时才放行。
-		if toolLooksObservational(c.Name) && l.mutatedAfter(c.Name, string(c.Arguments)) {
+		// 已完成过：验证/只读类工具在状态发生过变更后必须允许重新执行。
+		//
+		// 「状态是否变更」不能只看该调用之后 —— 模型的常见轨迹是
+		// 写文件 → run_tests 失败 → 再 run_tests 确认，中间并未再写文件，
+		// 此时 run_tests 本身就是最后一次完成的调用，按「之后是否有写入」
+		// 判定必然为 false，验证请求仍被剔除，评测继续空转。
+		// 实测 algorithm 任务连续三次「提前结束」即是此情形。
+		//
+		// 因此改为：只要整条 ledger 里存在过变更类调用，验证工具即可重复。
+		// 变更之前的纯观察仍然受限（见 mutatedAfter 的调用点被移除后由
+		// hasAnyMutation 承担），避免无意义的重复读取。
+		if toolLooksObservational(c.Name) && l.hasAnyMutation() {
 			out = append(out, c)
 		}
 	}
 	return out
 }
 
-// mutatedAfter 判断在指定调用最后一次完成之后，是否又发生过变更类调用。
-func (l agentLedger) mutatedAfter(name, args string) bool {
-	want := canonicalToolArguments(args)
-	last := -1
-	for i, e := range l.Completed {
-		if e.Name == name && canonicalToolArguments(e.Arguments) == want {
-			last = i
-		}
-	}
-	if last < 0 {
-		return false
-	}
-	for _, e := range l.Completed[last+1:] {
+// hasAnyMutation 判断本轮对话里是否发生过变更类调用（写文件、执行命令等）。
+//
+// 只要有过变更，工作区状态就与最初不同，验证/只读类工具的重复调用即为必要
+// 动作而非重复劳动。若全程只有观察类调用，则重复观察确实无意义，仍应剔除。
+func (l agentLedger) hasAnyMutation() bool {
+	for _, e := range l.Completed {
 		if !toolLooksObservational(e.Name) {
 			return true
 		}
