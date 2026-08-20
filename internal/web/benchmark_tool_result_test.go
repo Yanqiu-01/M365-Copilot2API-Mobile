@@ -98,3 +98,29 @@ func TestGenuineFailuresStillDetected(t *testing.T) {
 		t.Error("通过的测试被判为失败")
 	}
 }
+
+// write_file 需有上限：观察类工具结果已完整回传，写入不设限则模型可写大文件
+// 再读回，把上下文顶到上游 token 上限。正常大小的写入不得受影响。
+func TestWriteFileSizeCap(t *testing.T) {
+	task := benchTask{
+		ID: "cap", Category: "coding",
+		Files:  map[string]string{"a.py": "x = 1\n"},
+		Grader: func(map[string]string) (int, int, []string) { return 1, 1, nil },
+	}
+	ws := newBenchWorkspace(task)
+
+	if _, err := ws.execute("write_file", map[string]any{
+		"path": "a.py", "content": strings.Repeat("y", 4096),
+	}); err != nil {
+		t.Errorf("正常大小写入被拒: %v", err)
+	}
+
+	_, err := ws.execute("write_file", map[string]any{
+		"path": "big.py", "content": strings.Repeat("z", benchMaxFileBytes+1),
+	})
+	if err == nil {
+		t.Error("超限写入应被拒绝")
+	} else if !strings.Contains(err.Error(), "too large") {
+		t.Errorf("错误信息应说明超限，实际: %v", err)
+	}
+}

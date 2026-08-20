@@ -17,4 +17,3 @@ func TestToolPlanningModeAcceptsNative(t *testing.T) {
 		t.Fatalf("toolPlanningMode(native)=%q, want native", got)
 	}
 }
-

@@ -578,7 +578,10 @@ func (s *Server) callOwnChatCompletions(ctx context.Context, payload []byte, tim
 	request.Header.Set(internalCallHeader, "benchmark")
 	recorder := httptest.NewRecorder()
 	done := make(chan struct{})
-	go func() { s.openaiChat(recorder, request); close(done) }()
+	// openaiChat 在此处是进程内自调用，不经过 recoverPanics 中间件：
+	// 一次 panic 会终止整个 Go 子进程并清空内存中的管理会话。
+	// 用 safeGo 兜底，把失败收敛为本次评测请求的错误。
+	safeGo("benchChat.openaiChat", func() { defer close(done); s.openaiChat(recorder, request) })
 	select {
 	case <-done:
 		return recorder.Body.Bytes(), recorder.Code, nil
@@ -692,6 +695,14 @@ func (w *benchWorkspace) execute(name string, arguments map[string]any) (map[str
 		if !ok {
 			return nil, fmt.Errorf("content is required")
 		}
+		// 单文件上限。观察类工具的结果现在完整回传（toolResultBudget），
+		// 若写入不设限，模型可以写一个巨大文件再读回来，逐步把上下文顶到
+		// 上游 token 上限，任务以上游错误告终而非评分结果。
+		// 当前评测夹具最大文件不足 2 KiB，此限额只是护栏。
+		if len(content) > benchMaxFileBytes {
+			return nil, fmt.Errorf("content too large: %d bytes exceeds the %d byte limit",
+				len(content), benchMaxFileBytes)
+		}
 		if previous, exists := w.files[file]; exists && previous == content {
 			w.redundant++
 		} else {
@@ -779,6 +790,9 @@ func toolResultBudget(name string, size int) int {
 	}
 	return compact
 }
+
+// benchMaxFileBytes 是评测工作区内单个文件的写入上限。
+const benchMaxFileBytes = 256 * 1024
 
 // benchMaxSteps 是单任务的工具循环上限。
 // APK 证据：runBenchTask +0x03fc CMP #14，与前端「每项最多 14 步」一致。
@@ -1068,7 +1082,7 @@ func (s *Server) startBenchmark(model, effort string, ids []string) error {
 	s.benchmark.logf("开始评测：模型 %s，思考强度 %s（编程占 %.0f%%，纯 Go 隐藏评分器）",
 		model, normalizedEffort, codingShare)
 
-	go func() {
+	safeGoWithCleanup("benchmark.run", func() {
 		defer cancel()
 		for _, task := range tasks {
 			s.benchmark.update(func(run *benchmarkRun) {
@@ -1098,6 +1112,16 @@ func (s *Server) startBenchmark(model, effort string, ids []string) error {
 		final := s.benchmark.snapshot()
 		s.benchmark.logf("评测结束：编程 %.0f%%，推理 %.0f%%，加权总分 %.0f%%",
 			final.CodingScore*100, final.ReasoningScore*100, final.Average*100)
-	}()
+	}, func(rec any) {
+		// panic 已被捕获，进程存活；但运行状态必须收敛，否则前端一直显示
+		// 「运行中」且无法再次启动评测。
+		cancel()
+		s.benchmark.logf("评测异常终止：%v", rec)
+		s.benchmark.update(func(run *benchmarkRun) {
+			run.State = "error"
+			run.Current = ""
+			run.FinishedAt = time.Now().UTC()
+		})
+	})
 	return nil
 }

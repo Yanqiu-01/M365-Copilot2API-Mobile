@@ -45,12 +45,13 @@ func (s *Server) StartAutoCleanup() {
 	}
 
 	log.Printf("[auto-cleanup] enabled interval=%s max_age=%s keep_n=%d", interval, maxAge, keepN)
-	go func() {
+	// 长驻定时任务：一次 panic 会终止整个子进程，必须兜底。
+	safeGo("autoCleanup.loop", func() {
 		for {
 			time.Sleep(interval)
 			s.autoCleanupOnce(maxAge, keepN)
 		}
-	}()
+	})
 }
 
 func (s *Server) autoCleanupOnce(maxAge time.Duration, keepN int) {

@@ -200,7 +200,9 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 	}
 	attachCh := make(chan error, 1)
 	if len(req.Attachments) > 0 {
-		go func() { attachCh <- c.uploadAttachments(ctx, acc, req.ConversationID, req.Attachments) }()
+		safeGoDeliver("uploadAttachments",
+			func() { attachCh <- c.uploadAttachments(ctx, acc, req.ConversationID, req.Attachments) },
+			func(err error) { attachCh <- err })
 	}
 
 	dialStarted := time.Now()
@@ -319,10 +321,12 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 		_ = conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 		// ReadMessage 阻塞期间无法响应 ctx 取消，放入独立 goroutine 由 select 联动。
 		readCh := make(chan wsRead, 1)
-		go func() {
-			_, msg, err := conn.ReadMessage()
-			readCh <- wsRead{msg: msg, err: err}
-		}()
+		safeGoDeliver("conn.ReadMessage",
+			func() {
+				_, msg, err := conn.ReadMessage()
+				readCh <- wsRead{msg: msg, err: err}
+			},
+			func(err error) { readCh <- wsRead{err: err} })
 		var read wsRead
 		select {
 		case <-ctx.Done():

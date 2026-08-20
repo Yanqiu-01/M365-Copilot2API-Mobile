@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -122,22 +123,75 @@ func sanitizeWirePayload(payload string) string {
 	return string(encoded)
 }
 
+// credentialKeys 是按字段名直接删除的凭据键。
+//
+// 原实现只有前九个。审计实测发现 Cookie / Set-Cookie 未在清单内，
+// 抓帧结果里管理会话 cookie 原样可读。
+var credentialKeys = map[string]bool{
+	"access_token": true, "accesstoken": true,
+	"refresh_token": true, "refreshtoken": true,
+	"id_token": true, "idtoken": true,
+	"authorization": true, "token": true,
+	"client_secret": true, "clientsecret": true,
+	"password": true, "passwd": true,
+	"cookie": true, "set-cookie": true, "setcookie": true,
+	"x-api-key": true, "apikey": true, "api_key": true,
+	"proxy-authorization": true,
+	"secret":              true,
+	"sessionid":           true, "session_id": true,
+}
+
+// valueCredentialPatterns 擦除嵌在字符串值内部的凭据。
+//
+// 按字段名删除挡不住「凭据出现在某个正文字符串里」的情况 —— 审计实测
+// {"text":"curl -H 'Authorization: Bearer eyJ…'"} 与 {"note":"token is eyJ…"}
+// 都原样留在帧里。抓帧内容会经诊断端点读出，必须在值一级也擦一遍。
+var valueCredentialPatterns = []*regexp.Regexp{
+	// Bearer / Basic 等 HTTP 认证方案后的令牌。
+	regexp.MustCompile(`(?i)\b(bearer|basic|negotiate)\s+[A-Za-z0-9._~+/=-]{8,}`),
+	// JWT：三段点分的 base64url，以 eyJ 开头。
+	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9._-]+){1,2}`),
+	// cookie 或查询串中的 name=value 长串。
+	regexp.MustCompile(`(?i)\b(access_token|refresh_token|id_token|token|api[_-]?key|secret|password|passwd|sig|signature|session|sessionid|auth)\s*=\s*[A-Za-z0-9._~+/%-]{8,}`),
+}
+
+const redactedMarker = "[redacted]"
+
+// redactWireValue 递归擦除凭据：字段名命中即删除，字符串值再按模式擦除。
 func redactWireValue(value any) {
 	switch v := value.(type) {
 	case map[string]any:
 		for key, child := range v {
-			switch strings.ToLower(key) {
-			case "access_token", "accesstoken", "refresh_token", "refreshtoken", "authorization", "token", "client_secret", "clientsecret", "password":
+			if credentialKeys[strings.ToLower(key)] {
 				delete(v, key)
-			default:
-				redactWireValue(child)
+				continue
 			}
+			if text, ok := child.(string); ok {
+				v[key] = redactCredentialText(text)
+				continue
+			}
+			redactWireValue(child)
 		}
 	case []any:
-		for _, child := range v {
+		for i, child := range v {
+			if text, ok := child.(string); ok {
+				v[i] = redactCredentialText(text)
+				continue
+			}
 			redactWireValue(child)
 		}
 	}
+}
+
+// redactCredentialText 擦除字符串值里的凭据片段，保留其余诊断信息。
+func redactCredentialText(text string) string {
+	if text == "" {
+		return text
+	}
+	for _, pattern := range valueCredentialPatterns {
+		text = pattern.ReplaceAllString(text, redactedMarker)
+	}
+	return text
 }
 
 // redactHandshake removes both token spellings explicitly handled by the APK.

@@ -988,11 +988,12 @@ func (s *Server) dropTransientConversation(conversationID string) {
 	if conversationID == "" || m365CloudClient == nil {
 		return
 	}
-	go func(id string) {
+	id := conversationID
+	safeGo("transientConversation.delete", func() {
 		if err := m365CloudClient.DeleteConversation(id); err != nil {
 			log.Printf("[transient-conv] delete failed id=%s err=%v", id, err)
 		}
-	}(conversationID)
+	})
 }
 
 func (s *Server) adminModels(w http.ResponseWriter, r *http.Request) {

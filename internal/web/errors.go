@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 )
+
 // errNoAccounts marks "no usable account" conditions. The original APK reports
 // these with the account's own message and a 4xx status (never as a generic
 // 502 upstream failure), so clients can tell "you must log in" apart from
@@ -38,14 +39,15 @@ func writeAccountResolveError(w http.ResponseWriter, err error, errType string) 
 	writeOpenAIError(w, http.StatusBadRequest, errType, err.Error())
 }
 
-
 // classifyUpstream 把传输层失败翻译成一句可操作的诊断。
 //
 // APK 证据：internal/web/errors.go 的函数表含 classifyUpstream 与
 // upstreamStageError；rodata 中并列存在五句诊断（各 1 次）：
-//   upstream handshake failed / upstream rejected the request /
-//   upstream closed the connection early / upstream stalled, read timed out /
-//   upstream stopped responding mid-stream
+//
+//	upstream handshake failed / upstream rejected the request /
+//	upstream closed the connection early / upstream stalled, read timed out /
+//	upstream stopped responding mid-stream
+//
 // 判定关键词同样存在于二进制：bad handshake、abnormal closure、close 1006、
 // i/o timeout、use of closed network connection、connection reset by peer、
 // unexpected EOF。

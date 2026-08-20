@@ -210,7 +210,6 @@ func isToolRefusal(text string) bool {
 	return false
 }
 
-
 var sandboxHallucinationPatterns = []string{
 	"I can run that for you",
 	"I'll run that",
