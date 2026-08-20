@@ -47,6 +47,46 @@ func compactToolResult(s string, limit int) string {
 	return s[:head] + fmt.Sprintf("\n... [truncated %d bytes] ...\n", len(s)-head-tail) + s[len(s)-tail:]
 }
 
+// toolResultLooksFailed 判断一次工具结果是否表示失败。
+//
+// 不能直接对结果全文套 failureSignal：读文件类工具返回的是源代码，其中
+// "Exception"、"error"、"failed"、"not found" 都是正常标识符或字符串
+// —— 例如 inventory.py 首行就是 class StockError(Exception)。实测一次成功的
+// read_file 因此被记为 failed，模型随后连续多轮声称「read_file 结果被标记为
+// 失败，无法完整审查代码」，直到步数耗尽。
+//
+// 因此：观察类工具只在结构化的失败字段或显式错误前缀上判定；其余工具沿用
+// 原有的宽匹配。
+func toolResultLooksFailed(name, result string) bool {
+	trimmed := strings.TrimSpace(result)
+	if trimmed == "" {
+		return false
+	}
+	if toolLooksObservational(name) {
+		// 结构化结果：只认显式的失败字段。
+		var probe map[string]any
+		if json.Unmarshal([]byte(trimmed), &probe) == nil {
+			if v, ok := probe["error"]; ok && fmt.Sprint(v) != "" && fmt.Sprint(v) != "<nil>" {
+				return true
+			}
+			if v, ok := probe["passed"].(bool); ok {
+				return !v
+			}
+			// 成功的读取/列举结果不含 error 字段，直接视为成功。
+			return false
+		}
+		// 非 JSON：只认开头的显式错误说明，避免命中正文里的标识符。
+		lower := strings.ToLower(trimmed)
+		for _, prefix := range []string{"error", "failed", "failure", "exception:", "traceback"} {
+			if strings.HasPrefix(lower, prefix) {
+				return true
+			}
+		}
+		return false
+	}
+	return failureSignal.MatchString(compactToolResult(result, 4000))
+}
+
 // scopedCallID returns a globally unique tool call id. The scope parameters
 // are kept for signature compatibility with callers that pass per-turn
 // context; the id itself must not depend on call content or scope text,
@@ -95,8 +135,9 @@ func buildAgentLedger(messages []oaiMsg) agentLedger {
 		}
 		if m.Role == "tool" {
 			if e, ok := calls[m.ToolCallID]; ok {
-				e.Result = compactToolResult(contentToString(m.Content), 4000)
-				e.Failed = failureSignal.MatchString(e.Result)
+				raw := contentToString(m.Content)
+				e.Result = compactToolResult(raw, 4000)
+				e.Failed = toolResultLooksFailed(e.Name, raw)
 				calls[m.ToolCallID] = e
 			}
 		}

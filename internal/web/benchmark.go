@@ -756,6 +756,30 @@ func (s *Server) logRouterEvidence(taskID string, step int) {
 	}
 }
 
+// toolResultBudget 给出工具结果回传给模型时的长度上限。
+//
+// 观察类工具（读文件、列目录、跑测试）的输出是模型继续工作的唯一依据，必须
+// 完整回传；其余工具沿用 APK 的 400 字节紧凑摘要。上限仍受整体上下文预算约束，
+// 这里只放开到足以容纳单个源文件。
+func toolResultBudget(name string, size int) int {
+	const compact = 400
+	const generous = 64 * 1024
+	switch {
+	case strings.Contains(name, "read"),
+		strings.Contains(name, "list"),
+		strings.Contains(name, "test"),
+		strings.Contains(name, "check"):
+		if size < generous {
+			return size + 1
+		}
+		return generous
+	}
+	if size < compact {
+		return size + 1
+	}
+	return compact
+}
+
 // benchMaxSteps 是单任务的工具循环上限。
 // APK 证据：runBenchTask +0x03fc CMP #14，与前端「每项最多 14 步」一致。
 const benchMaxSteps = 14
@@ -912,7 +936,12 @@ func (s *Server) runBenchTask(ctx context.Context, task benchTask, model, effort
 			} else {
 				encoded, _ := json.Marshal(output)
 				s.benchmark.logf("[%s]   %s -> %s", task.ID, name, compactToolResult(string(encoded), 160))
-				reply["content"] = compactToolResult(string(encoded), 400)
+				// 文件内容必须完整回传：任务要求模型逐条对照 CONTRACT 找出
+				// 五处缺陷，而 inventory.py 有 1724 字节。按 400 字节截断后
+				// 模型只能看到开头与结尾，实测它连续多轮回复「read_file 返回
+				// 被截断的内容，无法完整读取 docstring 和实现」，直到步数耗尽。
+				// 日志侧仍做截断，只有发给模型的内容保持完整。
+				reply["content"] = compactToolResult(string(encoded), toolResultBudget(name, len(encoded)))
 			}
 			messages = append(messages, reply)
 		}
