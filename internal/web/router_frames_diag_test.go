@@ -32,12 +32,17 @@ func resetRouterFramesForTest(t *testing.T) func() {
 	}
 }
 
-func TestRouterFrameKeepAPKBounds(t *testing.T) {
+// 保留组数：默认 50、上限 200。
+//
+// 默认 3 组时，一轮能力评测（8 任务 × 最多 14 步，每次调用一个 requestID）
+// 会把最早的帧全部挤掉，只剩最后 3 组 —— 恰好是已通过的任务，想看的失败帧
+// 早已丢失。
+func TestRouterFrameKeepBounds(t *testing.T) {
 	for _, test := range []struct {
 		value string
 		want  int
 	}{
-		{"", 3}, {"0", 3}, {"21", 3}, {"bad", 3}, {"1", 1}, {"20", 20},
+		{"", 50}, {"0", 50}, {"201", 50}, {"bad", 50}, {"1", 1}, {"200", 200},
 	} {
 		t.Run(test.value, func(t *testing.T) {
 			t.Setenv("M365_CAPTURE_ROUTER_FRAMES_KEEP", test.value)
@@ -48,44 +53,111 @@ func TestRouterFrameKeepAPKBounds(t *testing.T) {
 	}
 }
 
-func TestRecordRouterFramesGroupsBoundsAndRedacts(t *testing.T) {
+// 采集结构必须符合 APK 的 DiagActivity 契约：它按
+// requestId / promptLen / textLen / reasoningLen / cause / frames 渲染，
+// 每帧再读 text / contentOrigin / addToChainOfThought / messageType。
+// 恢复版此前返回 prompt / response / responseLen / error，字段名全部对不上，
+// 原生诊断页只能渲染空白，表现为「开了捕获也什么都抓不到」。
+func TestRouterFramesMatchDiagActivityContract(t *testing.T) {
+	cleanup := resetRouterFramesForTest(t)
+	defer cleanup()
+
+	events := []json.RawMessage{
+		json.RawMessage(`{"type":2,"arguments":[{"messages":[
+			{"text":"先读文件","contentOrigin":"ChainOfThoughtSummary","addToChainOfThought":true,"messageType":"Chat"},
+			{"text":"CALL_TOOL: read_file({\"path\":\"a.py\"})","messageType":"Chat"}
+		]}]}`),
+	}
+	recordRouterFrames(routerFrameInput{
+		RequestID: "req-1",
+		Stage:     "router",
+		Prompt:    "路由提示",
+		Text:      "CALL_TOOL: read_file({\"path\":\"a.py\"})",
+		Reasoning: "先读文件",
+		Events:    events,
+	})
+
+	encoded, err := json.Marshal(routerFrameSnapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := string(encoded)
+	for _, key := range []string{
+		`"requestId"`, `"promptLen"`, `"textLen"`, `"reasoningLen"`,
+		`"frames"`, `"text"`, `"contentOrigin"`, `"addToChainOfThought"`, `"messageType"`,
+	} {
+		if !strings.Contains(payload, key) {
+			t.Errorf("payload missing DiagActivity field %s: %s", key, payload)
+		}
+	}
+	// 旧字段名不得再出现，否则原生诊断页会继续读不到。
+	for _, gone := range []string{`"response"`, `"responseLen"`, `"error"`} {
+		if strings.Contains(payload, gone) {
+			t.Errorf("payload still exposes legacy field %s", gone)
+		}
+	}
+
+	groups := routerFrameSnapshot()
+	if len(groups) != 1 {
+		t.Fatalf("groups=%d", len(groups))
+	}
+	g := groups[0]
+	if g.RequestID != "req-1" || g.Stage != "router" {
+		t.Errorf("group identity wrong: %+v", g)
+	}
+	if g.PromptLen == 0 || g.TextLen == 0 || g.ReasoningLen == 0 {
+		t.Errorf("lengths must be populated: %+v", g)
+	}
+	if len(g.Frames) != 2 {
+		t.Fatalf("frames=%d want 2 (projected from ChatHub messages)", len(g.Frames))
+	}
+	if !g.Frames[0].AddToChainOfThought || g.Frames[0].ContentOrigin != "ChainOfThoughtSummary" {
+		t.Errorf("reasoning frame must keep its markers: %+v", g.Frames[0])
+	}
+	if g.Frames[1].AddToChainOfThought {
+		t.Errorf("plain frame must not be marked as chain-of-thought: %+v", g.Frames[1])
+	}
+}
+
+// 失败帧必须带 cause，且凭据要脱敏。
+func TestRecordRouterFramesKeepsCauseAndRedacts(t *testing.T) {
 	cleanup := resetRouterFramesForTest(t)
 	defer cleanup()
 	t.Setenv("M365_CAPTURE_ROUTER_FRAMES_KEEP", "2")
 
-	recordRouterFrames("r1", "router", "Bearer secret-token access_token=another", "Authorization: hidden", nil)
-	recordRouterFrames("r1", "repair", "prompt", "response", nil)
-	first := routerFrameSnapshot()
-	if len(first) != 1 || len(first[0].Frames) != 2 {
-		t.Fatalf("first snapshot=%#v", first)
+	recordRouterFrames(routerFrameInput{
+		RequestID: "r1",
+		Stage:     "router",
+		Prompt:    "Bearer secret-token access_token=another",
+		Text:      "Authorization: hidden",
+		Err:       errNoAccounts,
+	})
+	groups := routerFrameSnapshot()
+	if len(groups) != 1 {
+		t.Fatalf("groups=%d", len(groups))
 	}
-	if strings.Contains(first[0].Frames[0].Prompt, "secret-token") || strings.Contains(first[0].Frames[0].Prompt, "another") || strings.Contains(first[0].Frames[0].Response, "hidden") {
-		t.Fatalf("router frame leaked sensitive content: %#v", first[0].Frames[0])
+	if groups[0].Cause == "" {
+		t.Error("failed router turn must record cause")
+	}
+	if strings.Contains(groups[0].Prompt, "secret-token") ||
+		strings.Contains(groups[0].Prompt, "another") ||
+		strings.Contains(groups[0].Text, "hidden") {
+		t.Errorf("credentials leaked: %+v", groups[0])
 	}
 
-	recordRouterFrames("r2", "router", "prompt2", "response2", nil)
-	recordRouterFrames("r3", "router", "prompt3", "response3", nil)
-	groups := routerFrameSnapshot()
+	// 超出 keep 时保留最近的组。
+	recordRouterFrames(routerFrameInput{RequestID: "r2", Stage: "router", Prompt: "p2", Text: "t2"})
+	recordRouterFrames(routerFrameInput{RequestID: "r3", Stage: "router", Prompt: "p3", Text: "t3"})
+	groups = routerFrameSnapshot()
 	if len(groups) != 2 || groups[0].RequestID != "r2" || groups[1].RequestID != "r3" {
-		t.Fatalf("groups=%#v", groups)
-	}
-	if len(groups[0].Frames) != 1 || groups[0].Frames[0].Stage != "router" {
-		t.Fatalf("group=%#v", groups[0])
-	}
-	for _, group := range groups {
-		for _, frame := range group.Frames {
-			if frame.PromptLen == 0 || frame.ResponseLen == 0 {
-				t.Fatalf("lengths missing: %#v", frame)
-			}
-		}
+		t.Fatalf("groups=%+v", groups)
 	}
 }
 
 func TestRouterFramesHandlers(t *testing.T) {
 	cleanup := resetRouterFramesForTest(t)
 	defer cleanup()
-	t.Setenv("M365_CAPTURE_ROUTER_FRAMES_KEEP", "3")
-	recordRouterFrames("request", "router", "prompt", "response", nil)
+	recordRouterFrames(routerFrameInput{RequestID: "request", Stage: "router", Prompt: "prompt", Text: "text"})
 
 	settings := &settingsStore{path: filepath.Join(t.TempDir(), "settings.json"), v: defaultRuntimeSettings()}
 	settings.v.CaptureRouterFrames = true
@@ -95,7 +167,7 @@ func TestRouterFramesHandlers(t *testing.T) {
 	if get.Code != http.StatusOK {
 		t.Fatalf("get status=%d body=%s", get.Code, get.Body.String())
 	}
-	// 原 APK 实测键名为 captures（并带固定 note），而非上游的 frames/keep。
+	// 原 APK 实测键名为 captures（并带固定 note）。
 	var payload struct {
 		Enabled  bool               `json:"enabled"`
 		Note     string             `json:"note"`

@@ -1286,7 +1286,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 		routePrompt := modelToolRouterPrompt(routerPromptMessages(body.Messages)+"\n"+ledger.RouterContext(), toolMaps, body.ToolChoice)
 		log.Printf("[req-trace] id=%s stage=router_start prompt_len=%d", requestID, len(routePrompt))
 		routeRes, routeErr := s.chatWithAccount(ctx, acc.ID, account, chathub.Request{Text: routePrompt, Tone: tone, Attachments: body.Attachments})
-		recordRouterFrames(requestID, "stream-router", routePrompt, routeRes.Text, routeErr)
+		recordRouterFrames(routerFrameInput{RequestID: requestID, Stage: "stream-router", Prompt: routePrompt, Text: routeRes.Text, Reasoning: routeRes.Reasoning, Events: routeRes.Events, Err: routeErr})
 		log.Printf("[req-trace] id=%s stage=router_return elapsed_ms=%d err=%t", requestID, time.Since(startedAt).Milliseconds(), routeErr != nil)
 		// Router turns run in a throwaway cloud conversation that is never
 		// reused by the answer turn; delete it so the conversation list does
@@ -1488,7 +1488,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 				// 失败帧必须先记录再返回：此前 recordRouterFrames 只在
 				// 成功路径上调用，用户开了「捕获路由原始帧」复现失败后，
 				// 诊断里依然空无一物 —— 恰恰是最需要证据的场景丢了证据。
-				recordRouterFrames(requestID, "router", routePrompt, routeRes.Text, routeErr)
+				recordRouterFrames(routerFrameInput{RequestID: requestID, Stage: "router", Prompt: routePrompt, Text: routeRes.Text, Reasoning: routeRes.Reasoning, Events: routeRes.Events, Err: routeErr})
 				// 带阶段标注，便于区分握手被拒 / 读超时 / 中途断流。
 				msg := upstreamStageError("router", routeErr)
 				if IsRateLimited(routeErr) {
@@ -1499,7 +1499,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.accountPool.MarkSuccess(acc.ID)
-			recordRouterFrames(requestID, "router", routePrompt, routeRes.Text, nil)
+			recordRouterFrames(routerFrameInput{RequestID: requestID, Stage: "router", Prompt: routePrompt, Text: routeRes.Text, Reasoning: routeRes.Reasoning, Events: routeRes.Events})
 		}
 		calls, parsed := parseModelToolDecision(routeRes.Text, toolMaps, body.ToolChoice)
 		if !parsed {
@@ -1775,7 +1775,7 @@ APPLICATION_REQUEST_AND_EVIDENCE:
 	if (planningMode == "native" || invalidDetectedTool) && len(toolMaps) > 0 && fmt.Sprint(body.ToolChoice) != "none" {
 		routePrompt := modelToolRouterPrompt(routerPromptMessages(body.Messages)+"\n"+ledger.RouterContext(), toolMaps, body.ToolChoice)
 		routeRes, routeErr := s.chatWithAccount(ctx, acc.ID, account, chathub.Request{Text: routePrompt, Tone: tone, Attachments: body.Attachments})
-		recordRouterFrames(requestID, "native-recovery", routePrompt, routeRes.Text, routeErr)
+		recordRouterFrames(routerFrameInput{RequestID: requestID, Stage: "native-recovery", Prompt: routePrompt, Text: routeRes.Text, Reasoning: routeRes.Reasoning, Events: routeRes.Events, Err: routeErr})
 		if routeErr == nil {
 			calls, parsed := parseModelToolDecision(routeRes.Text, toolMaps, body.ToolChoice)
 			if !parsed {
