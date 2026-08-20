@@ -29,12 +29,23 @@ OLD_PKG=com.m365.gateway
 NEW_LABEL='M365 网关 v3 修复版'
 VERSION_CODE=83
 VERSION_NAME=2.24.24
-# 密钥库必须固定在仓库内，不能落在输出目录：此前默认 $OUT/...，而每个
-# 版本用独立输出目录，keytool 因此每次都新生成一份密钥，导致每版签名都不
-# 一样，升级时必须先卸载。签名一致才能覆盖安装并保留数据。
-KS=${KS:-$REPO/packaging/keys/m365-gateway-v2.jks}
-KS_PASS=${KS_PASS:-[REDACTED]}
+# 密钥库必须在所有版本间保持同一份：此前默认落在 $OUT/...，而每版用独立输出
+# 目录，keytool 每次都新生成一份密钥，导致每版签名都不一样，升级时必须先卸载。
+# 签名一致才能覆盖安装并保留数据。
+#
+# 同时它绝不能进入 git：仓库一旦公开，任何人都能用这份密钥签出可覆盖安装的
+# 冒充版本。默认路径因此放在仓库之外，并由 .gitignore 兜底屏蔽 packaging/keys/。
+# 口令同理，不再硬编码 —— 通过环境变量提供，缺失时给出明确提示。
+KS=${KS:-${M365_KEYSTORE:-$HOME/.m365-gateway/m365-gateway-v2.jks}}
 KS_ALIAS=${KS_ALIAS:-m365v2}
+if [ -z "${KS_PASS:-}" ]; then
+  printf '%s\n' \
+    "错误：未提供密钥库口令。" \
+    "  请设置 KS_PASS，例如：KS_PASS=你的口令 bash $0 ..." \
+    "  密钥库路径由 KS（或 M365_KEYSTORE）指定，当前解析为：$KS" \
+    "  注意：口令与密钥库都不得提交进仓库。" >&2
+  exit 2
+fi
 
 # go.mod 要求 Go 1.23。优先使用项目固化的 1.23.12，避免系统 Go
 # 触发联网 toolchain 自动下载；也允许调用方通过 GO_BIN 覆盖。
@@ -181,7 +192,7 @@ if [ ! -f "$KS" ]; then
     -keyalg RSA -keysize 4096 -validity 10950 \
     -storepass "$KS_PASS" -keypass "$KS_PASS" \
     -dname "CN=M365 Gateway v2, OU=Recovery, O=Self-Signed, C=CN"
-  echo "已生成密钥库 $KS —— 请备份"
+  echo "已生成密钥库 $KS —— 请立即备份到仓库之外，且不要提交进 git"
 fi
 printf '签名密钥指纹: '
 keytool -list -keystore "$KS" -storepass "$KS_PASS" 2>/dev/null | grep -oE '\(SHA-256\): [0-9A-F:]+' || true
