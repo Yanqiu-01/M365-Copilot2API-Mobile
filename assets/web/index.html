@@ -707,7 +707,7 @@ if (response.output_text) {
             <div class="form-group"><label class="form-label">每轮工具调用上限</label><input class="form-input" id="setMaxToolCalls" type="number" min="1" max="64" placeholder="32"></div>
           </div>
           <div class="form-group"><label class="form-label">客户端身份</label><select class="form-input" id="setProfile"><option value="office">office（默认）</option><option value="cli">cli（agent/CLI 身份）</option></select><p class="form-hint">切换请求名义身份，用于对比上游行为。切换后即时生效。</p></div>
-          <div class="form-group"><label class="form-label">捕获路由原始帧</label><label class="switch-row"><input type="checkbox" id="setCapture"><span>用于诊断思考帧和工具调用帧，包含对话内容，仅临时开启</span></label></div>
+          <div class="form-group"><label class="form-label">捕获路由原始帧</label><label class="switch-row"><input type="checkbox" id="setCapture" onchange="toggleCapture(this.checked)"><span>拨动即刻生效并持久保存，无需点「保存设置」；包含对话内容，诊断完请关闭</span></label></div>
         </div></div>
         <div class="card" style="margin-bottom:14px"><div class="card-body">
           <p style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:12px;text-transform:uppercase;letter-spacing:.04em">重启后生效</p>
@@ -717,6 +717,7 @@ if (response.output_text) {
           <p style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:12px;text-transform:uppercase;letter-spacing:.04em">出站帧诊断</p>
           <p class="form-hint" style="margin-bottom:8px">元数据始终脱敏记录（令牌、提示词内容不记录）。发一次请求后点「查看」即可。</p>
           <button class="btn" onclick="loadWireFrames()">查看出站帧</button>
+          <button class="btn" onclick="loadRouterFrames()">查看路由帧</button>
           <pre id="wireOut" style="margin-top:10px;font-size:11px;line-height:1.6;white-space:pre-wrap;word-break:break-all;max-height:320px;overflow:auto;color:var(--muted)"></pre>
         </div></div>
         <div><button class="btn primary" onclick="saveSettings()">保存设置</button></div>
@@ -1559,6 +1560,22 @@ async function benchStop(){
   catch(e){showNotice(e.message,'error');}
 }
 
+async function toggleCapture(on){
+  // /api/admin/debug/router-frames/toggle 会把开关写入 settings 并同步
+  // chathub 的进程内状态，因此拨动即生效、且重启后仍保留。此前该开关只
+  // 在「保存设置」时随整份 settings 提交，用户拨完直接去看帧，服务端其实
+  // 从未开启捕获。
+  try{
+    await api('/api/admin/debug/router-frames/toggle',{method:'POST',body:JSON.stringify({enabled:!!on})});
+    await api('/api/admin/debug/wire/toggle',{method:'POST',body:JSON.stringify({enabled:!!on})});
+    if(loadedSettings)loadedSettings.captureRouterFrames=!!on;
+    showNotice(on?'已开启帧捕获（诊断完请关闭）':'已关闭帧捕获并清空已捕获内容','success');
+  }catch(e){
+    showNotice('切换失败: '+e.message,'error');
+    const el=$('setCapture'); if(el)el.checked=!on;
+  }
+}
+
 async function loadWireFrames(){
   const box=$('wireOut');
   if(!box)return;
@@ -1579,6 +1596,30 @@ async function loadWireFrames(){
   }catch(e){box.textContent='读取失败: '+e.message;}
 }
 
+async function loadRouterFrames(){
+  const box=$('wireOut');
+  if(!box)return;
+  box.textContent='加载中…';
+  try{
+    const d=await api('/api/admin/debug/router-frames');
+    const lines=['捕获开启: '+d.enabled];
+    if(d.note)lines.push('说明: '+d.note);
+    const groups=d.captures||[];
+    lines.push('请求组数: '+groups.length);
+    groups.forEach(g=>{
+      lines.push('');
+      lines.push('=== 请求 '+(g.requestId||'unknown')+' ===');
+      (g.frames||[]).forEach(f=>{
+        lines.push('--- 阶段 '+f.stage+'（prompt '+f.promptLen+' 字节，响应 '+f.responseLen+' 字节）---');
+        if(f.error)lines.push('错误: '+f.error);
+        if(f.response)lines.push('响应: '+f.response);
+        if(f.prompt)lines.push('提示: '+f.prompt);
+      });
+    });
+    box.textContent=lines.join('\n');
+  }catch(e){box.textContent='读取失败: '+e.message;}
+}
+
 async function saveSettings(){  try{
     // 只提交与服务端当前值不同的字段。此前无条件提交 listenAddress
     // （输入框里预填着当前值，if(listen) 恒真），每次保存都被判为「改了
@@ -1586,7 +1627,6 @@ async function saveSettings(){  try{
     const body={};
     const put=(key,val)=>{ if(val!==undefined&&val!==loadedSettings[key])body[key]=val; };
     const num=el=>{ const raw=$(el)?.value.trim(); if(!raw)return undefined; const n=parseInt(raw); return Number.isFinite(n)?n:undefined; };
-    put('captureRouterFrames',!!$('setCapture')?.checked);
     if($('setProfile'))put('clientProfile',$('setProfile').value);
     const listen=$('setListen')?.value.trim();
     if(listen)put('listenAddress',listen);

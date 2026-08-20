@@ -27,9 +27,12 @@ fi
 NEW_PKG=com.m365.gateway3
 OLD_PKG=com.m365.gateway
 NEW_LABEL='M365 网关 v3 修复版'
-VERSION_CODE=70
-VERSION_NAME=2.24.11
-KS=${KS:-$OUT/m365-gateway-v2.jks}
+VERSION_CODE=71
+VERSION_NAME=2.24.12
+# 密钥库必须固定在仓库内，不能落在输出目录：此前默认 $OUT/...，而每个
+# 版本用独立输出目录，keytool 因此每次都新生成一份密钥，导致每版签名都不
+# 一样，升级时必须先卸载。签名一致才能覆盖安装并保留数据。
+KS=${KS:-$REPO/packaging/keys/m365-gateway-v2.jks}
 KS_PASS=${KS_PASS:-[REDACTED]}
 KS_ALIAS=${KS_ALIAS:-m365v2}
 
@@ -168,12 +171,15 @@ zipalign -c 4 "$OUT/aligned.apk" >/dev/null
 
 printf '%s\n' '== 5/6 签名 =='
 if [ ! -f "$KS" ]; then
+  mkdir -p "$(dirname "$KS")"
   keytool -genkeypair -v -keystore "$KS" -alias "$KS_ALIAS" \
     -keyalg RSA -keysize 4096 -validity 10950 \
     -storepass "$KS_PASS" -keypass "$KS_PASS" \
     -dname "CN=M365 Gateway v2, OU=Recovery, O=Self-Signed, C=CN"
   echo "已生成密钥库 $KS —— 请备份"
 fi
+printf '签名密钥指纹: '
+keytool -list -keystore "$KS" -storepass "$KS_PASS" 2>/dev/null | grep -oE '\(SHA-256\): [0-9A-F:]+' || true
 apksigner sign --ks "$KS" --ks-key-alias "$KS_ALIAS" \
   --ks-pass "pass:$KS_PASS" --key-pass "pass:$KS_PASS" \
   --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
