@@ -14,9 +14,18 @@ func TestBenchTaskCatalogJSONHidesExecutionFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := string(encoded)
-	for _, leaked := range []string{"Files", "Protected", "Grader", "inventory.py", "sales.csv", "import json"} {
+	// 只断言结构体的执行期字段与产物内容不外泄。文件名本身会出现在
+	// detail 里（原 APK 的提示词就写明「工作区有 inventory.py」、
+	// 「工作区里有 sales.csv」），因此不能把文件名当作泄露标志。
+	for _, leaked := range []string{`"Files"`, `"Protected"`, `"Grader"`, "import json", "def summarize", "def load_users", "DEPOSIT A "} {
 		if strings.Contains(payload, leaked) {
 			t.Errorf("JSON must not expose %q", leaked)
+		}
+	}
+	// detail 必须完整下发：推理任务需要产物名与格式才能作答。
+	for _, want := range []string{"schedule.json", "route.json", "state.json", "report.json"} {
+		if !strings.Contains(payload, want) {
+			t.Errorf("catalog detail must keep the artifact name %q", want)
 		}
 	}
 	for _, want := range []string{`"id":"bugfix"`, `"category":"coding"`, `"id":"route"`, `"category":"reasoning"`} {

@@ -108,31 +108,173 @@ type benchmarkStore struct {
 //	+0x03d8 gradeIntervals  +0x03e4 gradeShift     +0x046c gradeLedger
 //	+0x0568 gradeSales      +0x05f0 gradeRoute
 //
+
+// 以下八条任务提示词逐字节取自原 APK 的 rodata（tools/apktool 提取
+// libm365.so，以任务开头与收尾句为锚切段）。恢复初期误将它们压缩成一句话
+// 概述，模型因此不知道该产出哪个文件、用什么格式 —— 推理类任务遂在第 1 步
+// 就「未写任何文件」结束，评分器读不到 schedule.json / report.json /
+// route.json / state.json，得分恒为 0。
+const (
+	benchDetailBugfix = `工作区有 inventory.py，类的 docstring 写明了正确的行为契约（CONTRACT）。
+当前实现违反了其中五条。
+
+请先用 read_file 读 inventory.py，逐条对照契约找出全部五处缺陷，然后用 write_file
+写回修正后的完整文件。不要改类名、方法名、异常名，也不要改 docstring。
+
+关键点提示（必须自己判断具体是哪几处）：
+- 数量的边界值校验
+- 失败操作是否应该写入 trail
+- 未知 sku 应该抛什么异常
+- 预留是否可能被重复占用
+- release 之后 reserved 是否可能变成负数
+
+改完后必须再调用 read_file 读回 inventory.py，逐条复核契约。
+只声明“已修复”但没有写文件将被判为未完成。`
+
+	benchDetailDebug = `工作区有两个文件：
+
+- stats.py：待修复的源码
+- run_report.txt：真实运行时产生的报错记录（只读，不要修改）
+
+请先 read_file 读 run_report.txt，看清报错，再 read_file 读 stats.py，
+然后修复所有问题并用 write_file 写回 stats.py。
+
+必须同时满足：
+1. 修掉 f-string 语法错误，mean 保留两位小数
+2. summarize([]) 不再抛异常：count=0，total=0，mean=None，max=None
+3. summarize 非空输入行为不变
+4. format_report 在空列表时也不能崩
+
+修好后再 read_file 读回 stats.py 自查一遍。反复读报错、改代码，直到自己确认通过。`
+
+	benchDetailRefactor = `工作区有 users.py 和 staff.py，其中 load_users 与 load_staff 的逻辑几乎完全重复
+（读 JSON、校验字段、规范化名字、排序）。people.json 是测试数据，只读，不要修改。
+
+请把公共逻辑抽取到一个新的共享模块，然后让两个文件都改成调用它。要求：
+
+- load_users 和 load_staff 的函数名与外部行为必须完全不变
+- 两个入口文件重构后各自不超过 12 行
+- 校验规则（年龄 0-150、名字必须是非空字符串等）只允许出现在共享模块里
+- 不要留下重复的校验代码
+
+改完后 read_file 读回三个文件确认。`
+
+	benchDetailAlgorithm = `请实现区间运算，使用半开区间 [start, end)。
+
+在工作区创建 intervals.py，提供两个函数：
+
+1. merge(intervals) -> list[tuple[int, int]]
+   合并所有重叠或相邻的区间，按 start 升序返回。
+   输入可能无序、重复、嵌套、为空，也可能含负数。
+   相邻视为可合并：[(1,4),(4,5)] -> [(1,5)]
+
+2. subtract(a, b) -> list[tuple[int, int]]
+   从区间集合 a 中减去区间集合 b，返回剩余部分，按 start 升序。
+   例：subtract([(1,10)], [(4,6)]) == [(1,4),(6,10)]
+
+复杂度要求：两个函数都必须能处理 100000 个区间的输入。
+必须先排序再线性扫描，禁止对每个点或每个整数做逐一枚举，
+也禁止使用 set 展开区间内的所有整数（会超时和爆内存）。
+
+然后在同一目录创建 notes.json，写明你的复杂度，格式严格如下（不要代码围栏）：
+
+{"mergeComplexity":"O(n log n)","subtractComplexity":"O(n log n)","approach":"一句话说明做法"}
+
+写完后 read_file 读回两个文件自查。`
+
+	benchDetailShift = `排班问题。四个人 Ann、Ben、Cara、Dan，四个班次 Mon、Tue、Wed、Thu。
+每人恰好排一个班次，每个班次恰好一个人。约束：
+
+1. Ann 不能排 Mon。
+2. Ben 只能排 Mon 或 Tue。
+3. Cara 的班次必须比 Dan 的班次晚（顺序 Mon < Tue < Wed < Thu）。
+4. Dan 不排 Tue。
+5. Wed 的人名字必须是四个字母（Ann 三个、Ben 三个、Cara 四个、Dan 三个）。
+
+请推理出唯一解，然后调用 write_file 把结果写成 schedule.json，格式严格如下（不要加注释、不要用代码围栏）：
+
+{"Mon":"名字","Tue":"名字","Wed":"名字","Thu":"名字"}
+
+写完后调用 read_file 读回 schedule.json 自查一遍，确认每条约束都成立。`
+
+	benchDetailSales = `工作区里有 sales.csv，列为 date,region,product,units,unit_price。
+
+请先用 read_file 读取它，然后计算：
+1. 每个 region 的总营收（营收 = units × unit_price）
+2. 营收最高的月份，格式 "YYYY-MM"
+3. 全部营收合计
+4. 营收最高的 region
+
+把结果调用 write_file 写成 report.json，格式严格如下（数字用数值，不要字符串，不要代码围栏）：
+
+{"revenueByRegion":{"north":0,"south":0,"east":0},"topMonth":"YYYY-MM","totalRevenue":0,"topRegion":"名称"}
+
+注意 unit_price 是小数，务必逐行累加，不要估算。写完后 read_file 读回自查。`
+
+	benchDetailLedger = `账务重放问题。工作区有 ledger.txt，每行一条操作，按顺序执行。
+账户初始余额都是 0。规则：
+
+- DEPOSIT <账户> <金额>：存入。金额必须 > 0，否则整条跳过并计一次 rejected。
+- WITHDRAW <账户> <金额>：取出。金额必须 > 0 且不超过当前余额，
+  否则整条跳过并计一次 rejected（余额绝不能变负）。
+- TRANSFER <源> <目标> <金额>：转账，必须原子。
+  如果源余额不足或金额 <= 0，整条跳过并计一次 rejected，两个账户都不变。
+
+请先 read_file 读取 ledger.txt，逐行重放，然后 write_file 写出 state.json，
+格式严格如下（余额用数值，不要代码围栏）：
+
+{"balances":{"A":0,"B":0,"C":0},"rejected":0,"applied":0}
+
+applied 是成功执行的操作条数，rejected 是被跳过的条数。两者相加应等于总行数。
+写完后 read_file 读回自查，确认没有负余额、且 applied+rejected 等于总行数。`
+
+	benchDetailRoute = `最短路问题。有向加权图，边如下（起点 终点 权重）：
+
+A B 4
+A C 2
+B D 5
+C B 1
+C D 8
+C E 10
+D E 2
+D F 6
+E F 3
+
+请求出 A 到 F 的最短路径和总权重，然后 write_file 写出 route.json，
+格式严格如下（不要代码围栏）：
+
+{"path":["A","...","F"],"cost":0}
+
+path 是从 A 到 F 依次经过的节点，cost 是路径总权重。
+注意存在多条候选路径，必须比较后取最小值。写完后 read_file 读回自查，
+把 path 上相邻边的权重逐段相加，确认等于 cost。`
+)
+
 // 与下列任务顺序逐一对应。
 func benchTasks() []benchTask {
 	none := func() map[string]string { return map[string]string{} }
 	return []benchTask{
-		{ID: "bugfix", Title: "库存预约修复", Detail: "修复库存预留、释放和审计轨迹中的契约违例。", Category: "coding",
+		{ID: "bugfix", Title: "库存预约修复", Detail: benchDetailBugfix, Category: "coding",
 			Files: map[string]string{"inventory.py": benchInventorySource}, Protected: none(), Grader: gradeInventory},
-		{ID: "debug", Title: "统计报告调试", Detail: "根据运行报错定位并修复统计报告模块。", Category: "coding",
+		{ID: "debug", Title: "统计报告调试", Detail: benchDetailDebug, Category: "coding",
 			Files:     map[string]string{"stats.py": benchStatsSource, "run_report.txt": benchRunReport},
 			Protected: map[string]string{"run_report.txt": benchRunReport}, Grader: gradeDebug},
-		{ID: "refactor", Title: "用户数据重构", Detail: "合并用户/员工加载逻辑并保持数据契约。", Category: "coding",
+		{ID: "refactor", Title: "用户数据重构", Detail: benchDetailRefactor, Category: "coding",
 			Files:     map[string]string{"users.py": benchUsersSource, "staff.py": benchStaffSource, "people.json": benchPeopleJSON},
 			Protected: map[string]string{"people.json": benchPeopleJSON}, Grader: gradeRefactor},
 		// algorithm 无初始产物：rodata 中 "intervals.py" 仅在字符串池内出现，
 		// gradeIntervals 首项检查即「intervals.py 存在」，要求从零创建。
-		{ID: "algorithm", Title: "区间算法", Detail: "实现并验证区间处理的正确性与复杂度。", Category: "coding",
+		{ID: "algorithm", Title: "区间算法", Detail: benchDetailAlgorithm, Category: "coding",
 			Files: none(), Protected: none(), Grader: gradeIntervals},
-		{ID: "shift", Title: "排班推理", Detail: "根据规则与人员约束给出可验证的排班结论。", Category: "reasoning",
+		{ID: "shift", Title: "排班推理", Detail: benchDetailShift, Category: "reasoning",
 			Files: none(), Protected: none(), Grader: gradeShift},
-		{ID: "sales", Title: "销售分析", Detail: "从销售数据中计算指标并解释异常。", Category: "reasoning",
+		{ID: "sales", Title: "销售分析", Detail: benchDetailSales, Category: "reasoning",
 			Files:     map[string]string{"sales.csv": benchSalesCSV},
 			Protected: map[string]string{"sales.csv": benchSalesCSV}, Grader: gradeSales},
-		{ID: "ledger", Title: "账本推理", Detail: "处理账本记录、无效操作和余额约束。", Category: "reasoning",
+		{ID: "ledger", Title: "账本推理", Detail: benchDetailLedger, Category: "reasoning",
 			Files:     map[string]string{"ledger.txt": benchLedgerText},
 			Protected: map[string]string{"ledger.txt": benchLedgerText}, Grader: gradeLedger},
-		{ID: "route", Title: "路径规划", Detail: "在给定图与约束下求解路径结果。", Category: "reasoning",
+		{ID: "route", Title: "路径规划", Detail: benchDetailRoute, Category: "reasoning",
 			Files: none(), Protected: none(), Grader: gradeRoute},
 	}
 }
