@@ -197,14 +197,49 @@ func shouldSuppressCompletedCall(name string) bool {
 	return !toolLooksMutating(strings.ToLower(strings.TrimSpace(name)))
 }
 
+// filterCompletedCalls 剔除「同名同参且已有结果」的调用，避免重复劳动。
+//
+// 但验证/只读类工具是例外：状态被改变之后，重新验证是必要动作而非重复劳动。
+// 评测里的 run_tests 参数恒为 {}，一旦第一次调用进入 ledger，之后每次请求都
+// 被剔除 —— calls 变空，网关据此判定「模型未调用工具」，追加闭环提示再推一轮，
+// 模型再次请求 run_tests 又被剔除，直到 14 步耗尽。表现就是运行日志里连续的
+// 「第 N 步提前结束，强制进入测试闭环」，最终因闭环未通过罚到地板分。
+//
+// 判定「状态已改变」以 ledger 中是否存在变更类调用为准：只要在该验证工具完成
+// 之后发生过写入，就必须允许再验证一次。
 func filterCompletedCalls(calls []detectedToolCall, l agentLedger) []detectedToolCall {
 	out := calls[:0]
 	for _, c := range calls {
 		if !l.hasCompleted(c.Name, string(c.Arguments)) {
 			out = append(out, c)
+			continue
+		}
+		// 已完成过：只有在状态已改变、且该工具属于验证/只读类时才放行。
+		if toolLooksObservational(c.Name) && l.mutatedAfter(c.Name, string(c.Arguments)) {
+			out = append(out, c)
 		}
 	}
 	return out
+}
+
+// mutatedAfter 判断在指定调用最后一次完成之后，是否又发生过变更类调用。
+func (l agentLedger) mutatedAfter(name, args string) bool {
+	want := canonicalToolArguments(args)
+	last := -1
+	for i, e := range l.Completed {
+		if e.Name == name && canonicalToolArguments(e.Arguments) == want {
+			last = i
+		}
+	}
+	if last < 0 {
+		return false
+	}
+	for _, e := range l.Completed[last+1:] {
+		if !toolLooksObservational(e.Name) {
+			return true
+		}
+	}
+	return false
 }
 func (l agentLedger) CanContinue(maxRounds int) error {
 	if maxRounds <= 0 {

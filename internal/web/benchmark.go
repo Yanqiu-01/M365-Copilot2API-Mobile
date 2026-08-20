@@ -733,6 +733,10 @@ func (w *benchWorkspace) execute(name string, arguments map[string]any) (map[str
 // APK 证据：runBenchTask +0x03fc CMP #14，与前端「每项最多 14 步」一致。
 const benchMaxSteps = 14
 
+// maxForcedClosures 是「强制进入测试闭环」提示的连续上限。超过即停止推进，
+// 把剩余步数留给真正的工作，而不是耗在同一句提示上。
+const maxForcedClosures = 3
+
 // benchCodingLoopPrompt 是编程任务追加的闭环要求，逐字节取自 APK
 // runBenchTask +0x0288（0x51e7f4，267 字节）。仅当 category=="coding"
 // 时经 concatstring2 追加到任务描述之后。
@@ -785,6 +789,9 @@ func (s *Server) runBenchTask(ctx context.Context, task benchTask, model, effort
 	}
 	messages := []map[string]any{{"role": "user", "content": prompt}}
 
+	// 连续强制推进的次数上限，防止空转耗尽全部步数。
+	forcedClosures := 0
+
 	for step := 1; step <= benchMaxSteps; step++ {
 		select {
 		case <-ctx.Done():
@@ -814,8 +821,20 @@ func (s *Server) runBenchTask(ctx context.Context, task benchTask, model, effort
 
 		if len(calls) == 0 {
 			// 编程任务若还没跑通测试就想收尾，强制再推一轮进入闭环。
+			//
+			// 推进次数必须设上限：模型可能持续不给工具调用（或其调用被上游
+			// 与网关之间的某一环丢掉），此时每一轮都是一次完整的上游请求，
+			// 14 步会全部空转在同一句提示上，最终因闭环未通过罚到地板分。
+			// 实测运行日志里连续出现「第 N 步提前结束」直到步数耗尽即是此情形。
 			if passed, runs := workspace.testStatus(); task.Category == "coding" && (!passed || runs == 0) {
-				s.benchmark.logf("[%s] 第 %d 步提前结束，强制进入测试闭环", task.ID, step)
+				if forcedClosures >= maxForcedClosures {
+					s.benchmark.logf("[%s] 第 %d 步：已连续 %d 次提示仍未进入闭环，停止推进",
+						task.ID, step, forcedClosures)
+					break
+				}
+				forcedClosures++
+				s.benchmark.logf("[%s] 第 %d 步提前结束，强制进入测试闭环（第 %d/%d 次）",
+					task.ID, step, forcedClosures, maxForcedClosures)
 				messages = append(messages,
 					map[string]any{"role": "assistant", "content": content},
 					map[string]any{"role": "user", "content": benchCodingLoopPrompt})
@@ -825,6 +844,8 @@ func (s *Server) runBenchTask(ctx context.Context, task benchTask, model, effort
 			break
 		}
 
+		// 模型给出了工具调用，说明推进有效，重置计数。
+		forcedClosures = 0
 		messages = append(messages, map[string]any{"role": "assistant", "content": content, "tool_calls": calls})
 		for _, raw := range calls {
 			call, _ := raw.(map[string]any)
