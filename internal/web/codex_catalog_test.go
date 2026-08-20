@@ -7,26 +7,135 @@ import (
 	"testing"
 )
 
+func originalCatalogSettings() runtimeSettings {
+	return runtimeSettings{
+		ContextWindow:       262144,
+		MaxOutputTokens:     16384,
+		ChatTimeoutSeconds:  600,
+		ImageTimeoutSeconds: 180,
+		ModelMappings:       append([]modelMapping(nil), defaultModelMappings...),
+	}
+}
+
 func TestModelTokenLimitsAreConsistent(t *testing.T) {
-	t.Setenv("M365_CONTEXT_WINDOW", "128000")
-	t.Setenv("M365_MAX_OUTPUT_TOKENS", "16384")
-	l := configuredModelLimits()
+	l := modelLimitsForSettings(runtimeSettings{ContextWindow: 128000, MaxOutputTokens: 16384})
 	if l.ContextWindow != 128000 || l.MaxOutputTokens != 16384 || l.MaxInputTokens != 111616 {
 		t.Fatalf("limits=%+v", l)
 	}
 }
 
 func TestModelTokenLimitsNormalizeBadOutputLimit(t *testing.T) {
-	t.Setenv("M365_CONTEXT_WINDOW", "100")
-	t.Setenv("M365_MAX_OUTPUT_TOKENS", "500")
-	l := configuredModelLimits()
+	l := modelLimitsForSettings(runtimeSettings{ContextWindow: 100, MaxOutputTokens: 500})
 	if l.MaxInputTokens <= 0 || l.MaxOutputTokens <= 0 || l.MaxInputTokens+l.MaxOutputTokens != l.ContextWindow {
 		t.Fatalf("inconsistent limits=%+v", l)
 	}
 }
 
+func TestKnownUpstreamTonesMatchOriginalAPK(t *testing.T) {
+	want := []string{
+		"Gpt_5_2_Chat", "Gpt_5_2_Reasoning", "Gpt_5_3_Chat", "Gpt_5_3_Reasoning",
+		"Gpt_5_4_Chat", "Gpt_5_4_Reasoning", "Gpt_5_5_Chat", "Gpt_5_5_Reasoning",
+		"Gpt_5_6_Reasoning", "Claude_Sonnet", "Claude_Sonnet_Reasoning",
+	}
+	got := knownUpstreamTones()
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("tones=%q, want %q", got, want)
+	}
+}
+
+func TestModelCatalogMatchesOriginalAPK(t *testing.T) {
+	type expectedModel struct {
+		id, owner, displayName string
+	}
+	want := []expectedModel{
+		{"gpt-5.2", "microsoft-365", "gpt-5.2"},
+		{"gpt-5.2-reasoning", "microsoft-365", "gpt-5.2-reasoning"},
+		{"gpt-5.3", "microsoft-365", "gpt-5.3"},
+		{"gpt-5.3-reasoning", "microsoft-365", "gpt-5.3-reasoning"},
+		{"gpt-5.4", "microsoft-365", "gpt-5.4"},
+		{"gpt-5.4-reasoning", "microsoft-365", "gpt-5.4-reasoning"},
+		{"gpt-5.5", "microsoft-365", "gpt-5.5"},
+		{"gpt-5.5-reasoning", "microsoft-365", "gpt-5.5-reasoning"},
+		{"gpt-5.6-reasoning", "microsoft-365", "gpt-5.6-reasoning"},
+		{"claude-sonnet", "anthropic-via-microsoft-365", "claude-sonnet"},
+		{"claude-sonnet-reasoning", "anthropic-via-microsoft-365", "claude-sonnet-reasoning"},
+		{"gpt-5.6-sol", "microsoft-365", "GPT-5.6-Sol"},
+		{"gpt-5.6-terra", "microsoft-365", "GPT-5.6-Terra"},
+		{"gpt-5.6-luna", "microsoft-365", "GPT-5.6-Luna"},
+	}
+	models := modelCatalogForSettings(originalCatalogSettings())
+	if len(models) != len(want) {
+		t.Fatalf("catalog count=%d, want %d", len(models), len(want))
+	}
+	for i, expected := range want {
+		model := models[i]
+		if model["id"] != expected.id || model["owned_by"] != expected.owner || model["display_name"] != expected.displayName {
+			t.Fatalf("model[%d]=%#v, want id=%q owner=%q display=%q", i, model, expected.id, expected.owner, expected.displayName)
+		}
+		if _, ok := model["configured"]; ok {
+			t.Fatalf("model[%d] leaked recovered-only configured flag: %#v", i, model)
+		}
+		if strings.HasSuffix(strings.ToLower(expected.id), "-chat") {
+			t.Fatalf("public model ID must not expose an upstream chat suffix: %q", expected.id)
+		}
+		if model["default_reasoning_level"] != "xhigh" || model["context_window"] != 262144 || model["max_input_tokens"] != 245760 || model["max_output_tokens"] != 16384 {
+			t.Fatalf("model[%d] metadata=%#v", i, model)
+		}
+	}
+}
+
+func TestStaticCatalogSurvivesAbsentMappings(t *testing.T) {
+	settings := originalCatalogSettings()
+	settings.ModelMappings = nil
+	models := modelCatalogForSettings(settings)
+	want := []string{
+		"gpt-5.2", "gpt-5.2-reasoning", "gpt-5.3", "gpt-5.3-reasoning",
+		"gpt-5.4", "gpt-5.4-reasoning", "gpt-5.5", "gpt-5.5-reasoning",
+		"gpt-5.6-reasoning", "claude-sonnet", "claude-sonnet-reasoning",
+	}
+	if len(models) != len(want) {
+		t.Fatalf("static catalog count=%d, want %d", len(models), len(want))
+	}
+	for i, id := range want {
+		if models[i]["id"] != id {
+			t.Fatalf("static model[%d]=%#v, want %q", i, models[i], id)
+		}
+	}
+}
+
+func TestInternalToneRoutingDoesNotChangePublicModelNames(t *testing.T) {
+	mappings := append([]modelMapping(nil), defaultModelMappings...)
+	cases := []struct {
+		model, effort, want string
+	}{
+		{"gpt-5.2", "", "Gpt_5_2_Chat"},
+		{"gpt-5.2-reasoning", "", "Gpt_5_2_Reasoning"},
+		{"gpt-5.3", "", "Gpt_5_3_Chat"},
+		{"gpt-5.3-reasoning", "", "Gpt_5_3_Reasoning"},
+		{"gpt-5.4", "", "Gpt_5_4_Chat"},
+		{"gpt-5.4-reasoning", "", "Gpt_5_4_Reasoning"},
+		{"gpt-5.5", "", "Gpt_5_5_Chat"},
+		{"gpt-5.5-reasoning", "", "Gpt_5_5_Reasoning"},
+		{"gpt-5.6-reasoning", "", "Gpt_5_6_Reasoning"},
+		{"claude-sonnet", "", "Claude_Sonnet"},
+		{"claude-sonnet-reasoning", "", "Claude_Sonnet_Reasoning"},
+		{"gpt-5.6-sol", "", "Gpt_5_6_Reasoning"},
+		{"gpt-5.6-terra", "", "Gpt_5_6_Reasoning"},
+		{"gpt-5.6-luna", "", "Gpt_5_6_Reasoning"},
+		{"gpt-5.2", "high", "Gpt_5_2_Reasoning"},
+		{"claude-sonnet", "high", "Claude_Sonnet_Reasoning"},
+		{"auto", "", "magic"},
+	}
+	for _, tc := range cases {
+		got, err := reasoningToneForMappings(tc.model, tc.effort, mappings)
+		if err != nil || got != tc.want {
+			t.Fatalf("route %s/%s = %q, %v; want %q", tc.model, tc.effort, got, err, tc.want)
+		}
+	}
+}
+
 func TestModelsAdvertiseContextAndReasoning(t *testing.T) {
-	s := &Server{}
+	s := &Server{settings: &settingsStore{v: originalCatalogSettings()}}
 	r := httptest.NewRequest("GET", "/v1/models", nil)
 	w := httptest.NewRecorder()
 	s.openaiModels(w, r)
@@ -43,8 +152,11 @@ func TestModelsAdvertiseContextAndReasoning(t *testing.T) {
 	if len(body.Models) != len(body.Data) {
 		t.Fatalf("models alias length=%d, data length=%d", len(body.Models), len(body.Data))
 	}
+	if len(body.Data) != 14 {
+		t.Fatalf("model catalog count=%d, want 14", len(body.Data))
+	}
 	for _, m := range body.Data {
-		if m["owned_by"] != "gateway" || m["description"] != "Public model endpoint." {
+		if m["description"] != "Microsoft 365 gateway model route." {
 			t.Fatalf("model catalog exposes provider details: %#v", m)
 		}
 		baseInstructions, ok := m["base_instructions"].(string)
@@ -139,18 +251,6 @@ func TestModelsAdvertiseContextAndReasoning(t *testing.T) {
 	}
 }
 
-func TestModelCatalogAdvertisesGPTImage2(t *testing.T) {
-	for _, model := range modelCatalog() {
-		if model["id"] == "gpt-image-2" {
-			if model["display_name"] != "GPT Image 2" {
-				t.Fatalf("display_name=%#v", model["display_name"])
-			}
-			return
-		}
-	}
-	t.Fatal("gpt-image-2 missing from model catalog")
-}
-
 func TestConfiguredModelMappingsDriveCatalogAndRouting(t *testing.T) {
 	mappings := []modelMapping{{PublicModel: "gpt-5.6-sol", UpstreamTone: "Gpt_5_6_Reasoning", DisplayName: "GPT-5.6-Sol", DefaultReasoningLevel: "low"}}
 	models := configuredModelSpecs(mappings)
@@ -165,13 +265,13 @@ func TestConfiguredModelMappingsDriveCatalogAndRouting(t *testing.T) {
 		t.Fatalf("tone=%q ok=%t", tone, ok)
 	}
 	override := configuredModelSpecs([]modelMapping{{PublicModel: "gpt-5.5", UpstreamTone: "Gpt_5_5_Reasoning", DisplayName: "GPT-5.5", DefaultReasoningLevel: "high"}})
-	if len(override) != len(gatewayModels) || override[5].DefaultReasoningLevel != "high" {
+	if len(override) != len(gatewayModels) || override[6].DefaultReasoningLevel != "high" {
 		t.Fatalf("built-in override=%#v", override)
 	}
 }
 
 func TestModelCatalogIncludesMaxReasoningPreset(t *testing.T) {
-	for _, model := range modelCatalog() {
+	for _, model := range modelCatalogForSettings(originalCatalogSettings()) {
 		levels, ok := model["supported_reasoning_levels"].([]reasoningEffortPreset)
 		if !ok {
 			t.Fatalf("reasoning levels have unexpected type: %T", model["supported_reasoning_levels"])
@@ -194,13 +294,14 @@ func TestReasoningEffortRouting(t *testing.T) {
 		{"gpt-5.6-reasoning", "none", "Gpt_5_6_Reasoning"},
 		{"gpt-5.6-reasoning", "max", "Gpt_5_6_Reasoning"},
 	}
+	mappings := append([]modelMapping(nil), defaultModelMappings...)
 	for _, tc := range cases {
-		got, err := reasoningTone(tc.model, tc.effort)
+		got, err := reasoningToneForMappings(tc.model, tc.effort, mappings)
 		if err != nil || got != tc.want {
 			t.Fatalf("%s/%s got=%q err=%v", tc.model, tc.effort, got, err)
 		}
 	}
-	if _, err := reasoningTone("gpt-5.6-reasoning", "extreme"); err == nil {
+	if _, err := reasoningToneForMappings("gpt-5.6-reasoning", "extreme", defaultModelMappings); err == nil {
 		t.Fatal("invalid effort accepted")
 	}
 }

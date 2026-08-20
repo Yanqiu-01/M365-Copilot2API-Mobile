@@ -1368,12 +1368,9 @@ async function loadModelTest(){
   $('modelTestRows').innerHTML='<tr><td colspan="4" class="empty">加载中...</td></tr>';
   try{
     const d=await api('/api/admin/models');
-    const all=d.data||[];
-    // Prefer explicit routes from Settings. Historical compatibility aliases
-    // are still exposed to API clients, but probing all of them needlessly
-    // produces tenant-specific refusal replies.
-    const configured=all.filter(m=>m&&m.configured===true);
-    const models=configured.length?configured:all;
+    // Keep the complete APK-compatible catalog visible. Configured aliases
+    // are additional routes, not a replacement for built-in model entries.
+    const models=d.data||[];
     if(!models.length){$('modelTestRows').innerHTML='<tr><td colspan="4" class="empty">暂无可用模型</td></tr>';return;}
     $('modelTestRows').innerHTML=models.map(m=>`<tr data-model="${esc(m.id)}"><td><b>${esc(m.id)}</b></td><td><span class="status"><i></i>未测试</span></td><td style="font-size:12px;color:var(--muted)">-</td><td style="font-size:12px;color:var(--muted)">点击"测试全部"</td></tr>`).join('');
   }catch(e){$('modelTestRows').innerHTML=`<tr><td colspan="4" class="empty">${esc(e.message)}</td></tr>`;}
@@ -1434,9 +1431,7 @@ async function loadBenchmark(){
     if(mSel&&!mSel.options.length){
       try{
         const md=await api('/api/admin/models');
-        const all=md.data||[];
-        const configured=all.filter(m=>m&&m.configured===true);
-        const models=configured.length?configured:all;
+        const models=md.data||[];
         const ids=models.map(m=>m&&m.id).filter(Boolean);
         const preferred=String(d.defaultModel||'gpt-5.6-reasoning');
         mSel.innerHTML=ids.map(id=>`<option value="${esc(id)}"${id===preferred?' selected':''}>${esc(id)}</option>`).join('');

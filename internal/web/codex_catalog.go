@@ -4,16 +4,9 @@ package web
 
 import (
 	"fmt"
-	"io"
-	"log"
-	"net/http"
 	"os"
-	"regexp"
-	"sort"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 )
 
 type modelLimits struct{ ContextWindow, MaxInputTokens, MaxOutputTokens int }
@@ -63,30 +56,24 @@ func codexModelMessages() map[string]any {
 	}
 }
 
+// gatewayModels is the static catalog recovered from the APK. The three
+// operator-configurable aliases are appended by configuredModelSpecs.
 var gatewayModels = []modelSpec{
 	{ID: "gpt-5.2", Owner: "microsoft-365", Tools: true},
 	{ID: "gpt-5.2-reasoning", Owner: "microsoft-365", Tools: true},
 	{ID: "gpt-5.3", Owner: "microsoft-365", Tools: true},
+	{ID: "gpt-5.3-reasoning", Owner: "microsoft-365", Tools: true},
 	{ID: "gpt-5.4", Owner: "microsoft-365", Tools: true},
 	{ID: "gpt-5.4-reasoning", Owner: "microsoft-365", Tools: true},
 	{ID: "gpt-5.5", Owner: "microsoft-365", Tools: true},
 	{ID: "gpt-5.5-reasoning", Owner: "microsoft-365", Tools: true},
 	{ID: "gpt-5.6-reasoning", Owner: "microsoft-365", Tools: true},
-	{ID: "gpt-image-2", Owner: "microsoft-365", DisplayName: "GPT Image 2"},
 	{ID: "claude-sonnet", Owner: "anthropic-via-microsoft-365", Tools: true},
 	{ID: "claude-sonnet-reasoning", Owner: "anthropic-via-microsoft-365", Tools: true},
-	{ID: "claude-opus-4-8", Owner: "anthropic-via-microsoft-365", Tools: true},
-	{ID: "claude-opus-4-8-reasoning", Owner: "anthropic-via-microsoft-365", Tools: true},
-	{ID: "claude-sonnet-4-6", Owner: "anthropic-via-microsoft-365", Tools: true},
-	{ID: "claude-sonnet-4-6-reasoning", Owner: "anthropic-via-microsoft-365", Tools: true},
-	{ID: "claude-opus-4-6", Owner: "anthropic-via-microsoft-365", Tools: true},
-	{ID: "claude-opus-4-6-reasoning", Owner: "anthropic-via-microsoft-365", Tools: true},
-	{ID: "claude-fable-5", Owner: "anthropic-via-microsoft-365", Tools: true},
-	{ID: "claude-fable-5-reasoning", Owner: "anthropic-via-microsoft-365", Tools: true},
 }
 
 func validUpstreamTone(tone string) bool {
-	for _, known := range liveUpstreamTones() {
+	for _, known := range knownUpstreamTones() {
 		if tone == known {
 			return true
 		}
@@ -95,75 +82,11 @@ func validUpstreamTone(tone string) bool {
 }
 
 func knownUpstreamTones() []string {
-	return []string{"Gpt_5_2_Chat", "Gpt_5_2_Reasoning", "Gpt_5_3_Chat", "Gpt_5_3_Reasoning", "Gpt_5_4_Chat", "Gpt_5_4_Reasoning", "Gpt_5_5_Chat", "Gpt_5_5_Reasoning", "Gpt_5_6_Reasoning", "Claude_Sonnet", "Claude_Sonnet_Reasoning", "Claude_Opus_4_8", "Claude_Opus_4_8_Reasoning", "Claude_Sonnet_4_6", "Claude_Sonnet_4_6_Reasoning", "Claude_Opus_4_6", "Claude_Opus_4_6_Reasoning", "Claude_Fable_5", "Claude_Fable_5_Reasoning"}
-}
-
-var (
-	dynamicTones []string
-	dynamicMu    sync.RWMutex
-	dynamicAt    time.Time
-)
-
-func liveUpstreamTones() []string {
-	dynamicMu.RLock()
-	if dynamicAt.IsZero() || time.Since(dynamicAt) > 24*time.Hour {
-		dynamicMu.RUnlock()
-		go syncUpstreamTones()
-		dynamicMu.RLock()
+	return []string{
+		"Gpt_5_2_Chat", "Gpt_5_2_Reasoning", "Gpt_5_3_Chat", "Gpt_5_3_Reasoning",
+		"Gpt_5_4_Chat", "Gpt_5_4_Reasoning", "Gpt_5_5_Chat", "Gpt_5_5_Reasoning",
+		"Gpt_5_6_Reasoning", "Claude_Sonnet", "Claude_Sonnet_Reasoning",
 	}
-	t := dynamicTones
-	dynamicMu.RUnlock()
-	if len(t) > 0 {
-		return t
-	}
-	return knownUpstreamTones()
-}
-
-func syncUpstreamTones() {
-	tones := fetchUpstreamTones()
-	if len(tones) == 0 {
-		return
-	}
-	dynamicMu.Lock()
-	dynamicTones = tones
-	dynamicAt = time.Now()
-	dynamicMu.Unlock()
-	log.Printf("synced %d upstream tones from CDN bundle", len(tones))
-}
-
-func fetchUpstreamTones() []string {
-	client := &http.Client{Timeout: 30 * time.Second}
-	pageURL := "https://m365.cloud.microsoft/"
-	resp, err := client.Get(pageURL)
-	if err != nil {
-		return nil
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	re := regexp.MustCompile(`main\.[a-f0-9]{8}\.js`)
-	m := re.FindString(string(body))
-	if m == "" {
-		return nil
-	}
-	bundleURL := "https://res.public.onecdn.static.microsoft/midgard/versionless-v2/" + m
-	resp2, err := client.Get(bundleURL)
-	if err != nil {
-		return nil
-	}
-	bundle, _ := io.ReadAll(resp2.Body)
-	resp2.Body.Close()
-	toneRe := regexp.MustCompile(`(?:Gpt_[0-9]_[0-9]_[A-Za-z_]+|Claude_[A-Za-z0-9_]+|Magic)`)
-	matches := toneRe.FindAllString(string(bundle), -1)
-	seen := map[string]bool{}
-	for _, t := range matches {
-		seen[t] = true
-	}
-	result := make([]string, 0, len(seen))
-	for t := range seen {
-		result = append(result, t)
-	}
-	sort.Strings(result)
-	return result
 }
 
 func configuredModelMapping(model string, mappings []modelMapping) (modelMapping, bool) {
@@ -213,8 +136,7 @@ func positiveEnvInt(name string, fallback int) int {
 	}
 	return fallback
 }
-func configuredModelLimits() modelLimits {
-	cfg := currentSettings()
+func modelLimitsForSettings(cfg runtimeSettings) modelLimits {
 	contextWindow := cfg.ContextWindow
 	maxOutput := cfg.MaxOutputTokens
 	if maxOutput >= contextWindow {
@@ -224,6 +146,10 @@ func configuredModelLimits() modelLimits {
 		}
 	}
 	return modelLimits{ContextWindow: contextWindow, MaxInputTokens: contextWindow - maxOutput, MaxOutputTokens: maxOutput}
+}
+
+func configuredModelLimits() modelLimits {
+	return modelLimitsForSettings(currentSettings())
 }
 func normalizeReasoningEffort(e string) (string, error) {
 	e = strings.ToLower(strings.TrimSpace(e))
@@ -236,12 +162,16 @@ func normalizeReasoningEffort(e string) (string, error) {
 	}
 	return "", fmt.Errorf("unsupported reasoning effort %q; use none, minimal, low, medium, high, xhigh, or max", e)
 }
-func reasoningTone(model, effort string) (string, error) {
+
+// reasoningToneForMappings resolves a public model ID to an internal ChatHub
+// tone. Values such as Gpt_5_2_Chat are upstream-only identifiers: they are
+// never public model IDs and are not emitted by the model catalog.
+func reasoningToneForMappings(model, effort string, mappings []modelMapping) (string, error) {
 	e, err := normalizeReasoningEffort(effort)
 	if err != nil {
 		return "", err
 	}
-	if tone, ok := configuredModelTone(model, currentSettings().ModelMappings); ok {
+	if tone, ok := configuredModelTone(model, mappings); ok {
 		return tone, nil
 	}
 	base := modelTone(model)
@@ -255,31 +185,30 @@ func reasoningTone(model, effort string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(model)) {
 	case "claude", "claude-sonnet":
 		return "Claude_Sonnet_Reasoning", nil
-	case "claude-opus-4-8":
-		return "Claude_Opus_4_8_Reasoning", nil
-	case "claude-sonnet-4-6":
-		return "Claude_Sonnet_4_6_Reasoning", nil
-	case "claude-opus-4-6":
-		return "Claude_Opus_4_6_Reasoning", nil
-	case "claude-fable-5":
-		return "Claude_Fable_5_Reasoning", nil
 	case "gpt-5.2":
 		return "Gpt_5_2_Reasoning", nil
-	case "gpt-5.3":
+	case "gpt-5.3", "gpt-5.3-reasoning":
 		return "Gpt_5_3_Reasoning", nil
 	case "gpt-5.4":
 		return "Gpt_5_4_Reasoning", nil
 	case "gpt-5.5":
 		return "Gpt_5_5_Reasoning", nil
 	case "gpt-5.6":
-		return "Gpt_5_5_Reasoning", nil
+		return "Gpt_5_6_Reasoning", nil
 	default:
 		return "Gpt_5_5_Reasoning", nil
 	}
 }
+
+func reasoningTone(model, effort string) (string, error) {
+	return reasoningToneForMappings(model, effort, currentSettings().ModelMappings)
+}
 func modelCatalog() []map[string]any {
-	l := configuredModelLimits()
-	settings := currentSettings()
+	return modelCatalogForSettings(currentSettings())
+}
+
+func modelCatalogForSettings(settings runtimeSettings) []map[string]any {
+	l := modelLimitsForSettings(settings)
 	models := configuredModelSpecs(settings.ModelMappings)
 	out := make([]map[string]any, 0, len(models))
 	for _, m := range models {
@@ -302,16 +231,16 @@ func modelCatalog() []map[string]any {
 		}
 		defaultReasoningLevel := m.DefaultReasoningLevel
 		if defaultReasoningLevel == "" {
-			defaultReasoningLevel = "medium"
+			defaultReasoningLevel = "xhigh"
 		}
-		_, configured := configuredModelMapping(m.ID, settings.ModelMappings)
+		owner := m.Owner
+		if owner == "" {
+			owner = "microsoft-365"
+		}
 		out = append(out, map[string]any{
-			"id": m.ID, "slug": m.ID, "display_name": displayName, "description": "Public model endpoint.",
-			// The admin UI uses this to prefer routes that the operator explicitly
-			// configured over the historical compatibility aliases in the catalog.
-			"configured":        configured,
+			"id": m.ID, "slug": m.ID, "display_name": displayName, "description": "Microsoft 365 gateway model route.",
 			"base_instructions": gatewayCodexBaseInstructions, "model_messages": codexModelMessages(),
-			"default_reasoning_level": defaultReasoningLevel, "object": "model", "owned_by": "gateway",
+			"default_reasoning_level": defaultReasoningLevel, "object": "model", "owned_by": owner,
 			"shell_type": "shell_command", "visibility": "list", "supported_in_api": true, "priority": 1,
 			"additional_speed_tiers": []string{}, "service_tiers": []any{},
 			"availability_nux": nil, "upgrade": nil, "include_skills_usage_instructions": false,
@@ -331,4 +260,24 @@ func modelCatalog() []map[string]any {
 		})
 	}
 	return out
+}
+
+// catalogModels makes endpoint output depend on the settings store owned by
+// this server. Production servers use the global store; isolated tests can
+// provide an explicit in-memory snapshot without changing process state.
+func (s *Server) catalogModels() []map[string]any {
+	if s != nil && s.settings != nil {
+		return modelCatalogForSettings(s.settings.get())
+	}
+	return modelCatalog()
+}
+
+// requestedTone mirrors catalogModels for request routing: public model IDs
+// stay unchanged while their private upstream tone is resolved from the same
+// server settings snapshot.
+func (s *Server) requestedTone(model, effort string) (string, error) {
+	if s != nil && s.settings != nil {
+		return reasoningToneForMappings(model, effort, s.settings.get().ModelMappings)
+	}
+	return reasoningTone(model, effort)
 }

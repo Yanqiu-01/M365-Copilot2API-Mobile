@@ -100,8 +100,8 @@ func TestPublicIdentityAnswerDetectsSelfQuestionsOnly(t *testing.T) {
 
 func TestPublicIdentityAnswerUsesRequestedModelForAllAdvertisedModels(t *testing.T) {
 	models := configuredModelSpecs(defaultModelMappings)
-	if len(models) != 22 {
-		t.Fatalf("advertised models=%d, want 22", len(models))
+	if len(models) != 14 {
+		t.Fatalf("advertised models=%d, want 14", len(models))
 	}
 	for _, model := range models {
 		answer, detected := publicIdentityAnswer([]oaiMsg{{Role: "user", Content: "你是什么模型？"}}, model.ID)

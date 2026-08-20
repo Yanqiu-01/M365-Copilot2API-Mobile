@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,11 +10,13 @@ import (
 )
 
 func benchmarkHTTPServer() *Server {
+	settings := &settingsStore{v: defaultRuntimeSettings()}
 	return &Server{
 		benchmark:          &benchmarkStore{run: benchmarkRun{State: "idle"}},
 		accountPool:        newAccountHealth(),
 		upstreamCooldown:   newAccountCooldown(),
 		accountConcurrency: newAccountConcurrency(),
+		settings:           settings,
 	}
 }
 
@@ -39,12 +42,41 @@ func TestBenchmarkHTTPStatusAndStop(t *testing.T) {
 	}
 }
 
-func TestBenchmarkDefaultModelPrefersConfiguredRoute(t *testing.T) {
+func TestBenchmarkEndpointMatchesOriginalAPKShape(t *testing.T) {
+	s := benchmarkHTTPServer()
+	w := httptest.NewRecorder()
+	s.adminBenchmark(w, httptest.NewRequest(http.MethodGet, "/api/admin/benchmark", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Run     map[string]any   `json:"run"`
+		Tasks   []map[string]any `json:"tasks"`
+		Efforts []string         `json:"efforts"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Tasks) != 8 || strings.Join(body.Efforts, ",") != "low,medium,high,xhigh,max" {
+		t.Fatalf("body=%#v", body)
+	}
+	if body.Run["state"] != "idle" {
+		t.Fatalf("idle run=%#v", body.Run)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := raw["defaultModel"]; exists {
+		t.Fatalf("original APK endpoint must not expose recovered-only defaultModel: %#v", raw)
+	}
+}
+
+func TestBenchmarkDefaultModelUsesStableBuiltInRoute(t *testing.T) {
 	if got := benchmarkDefaultModel([]modelMapping{
-		{PublicModel: "", UpstreamTone: ""},
 		{PublicModel: " gpt-5.6-sol ", UpstreamTone: "Gpt_5_6_Reasoning"},
-	}); got != "gpt-5.6-sol" {
-		t.Fatalf("configured default=%q", got)
+	}); got != "gpt-5.6-reasoning" {
+		t.Fatalf("stable default=%q", got)
 	}
 	if got := benchmarkDefaultModel(nil); got != "gpt-5.6-reasoning" {
 		t.Fatalf("fallback default=%q", got)

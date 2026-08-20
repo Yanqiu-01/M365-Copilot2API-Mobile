@@ -176,7 +176,6 @@ func (s *Server) Routes() http.Handler {
 	m.HandleFunc("/api/admin/keys", s.adminKeys)
 	m.HandleFunc("/api/admin/models", s.adminModels)
 	m.HandleFunc("/api/admin/models/test", s.adminModelTest)
-	m.HandleFunc("/api/admin/models/sync", s.adminModelSync)
 	m.HandleFunc("/api/admin/settings", s.adminSettings)
 	m.HandleFunc("/api/admin/proxy-pool", s.proxyPool)
 	m.HandleFunc("/api/admin/deployments", s.deployments)
@@ -691,6 +690,9 @@ func (s *Server) callbackPKCE(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) resolveAccount(accountID string) (auth.AccountToken, error) {
+	if s == nil || s.tokens == nil {
+		return auth.AccountToken{}, fmt.Errorf("no accounts; login first")
+	}
 	if accountID == "" {
 		acc, ok := s.tokens.Next()
 		if !ok {
@@ -782,6 +784,8 @@ func modelTone(model string) string {
 		return "Gpt_5_2_Reasoning"
 	case "gpt-5.3":
 		return "Gpt_5_3_Chat"
+	case "gpt-5.3-reasoning":
+		return "Gpt_5_3_Reasoning"
 	case "gpt-5.4":
 		return "Gpt_5_4_Chat"
 	case "gpt-5.4-reasoning":
@@ -796,22 +800,6 @@ func modelTone(model string) string {
 		return "Claude_Sonnet"
 	case "claude-sonnet-reasoning":
 		return "Claude_Sonnet_Reasoning"
-	case "claude-opus-4-8":
-		return "Claude_Opus_4_8"
-	case "claude-opus-4-8-reasoning":
-		return "Claude_Opus_4_8_Reasoning"
-	case "claude-sonnet-4-6":
-		return "Claude_Sonnet_4_6"
-	case "claude-sonnet-4-6-reasoning":
-		return "Claude_Sonnet_4_6_Reasoning"
-	case "claude-opus-4-6":
-		return "Claude_Opus_4_6"
-	case "claude-opus-4-6-reasoning":
-		return "Claude_Opus_4_6_Reasoning"
-	case "claude-fable-5":
-		return "Claude_Fable_5"
-	case "claude-fable-5-reasoning":
-		return "Claude_Fable_5_Reasoning"
 	case "gpt-5.4-quick":
 		return "Gpt_5_4_Chat"
 	case "gpt-5.3-think-deeper":
@@ -953,22 +941,12 @@ func (s *Server) dropTransientConversation(conversationID string) {
 	}(conversationID)
 }
 
-func (s *Server) adminModelSync(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	syncUpstreamTones()
-	tones := liveUpstreamTones()
-	jsonOut(w, map[string]any{"synced": true, "upstream_tones": tones, "count": len(tones)})
-}
-
 func (s *Server) adminModels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	jsonOut(w, map[string]any{"object": "list", "data": modelCatalog()})
+	jsonOut(w, map[string]any{"object": "list", "data": s.catalogModels()})
 }
 
 // adminModelTest 由控制台模型测试调用，通过管理员会话鉴权，不依赖明文 API Key
@@ -999,7 +977,7 @@ func (s *Server) adminModelTest(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "account_error", "account missing oid/tid")
 		return
 	}
-	tone, _ := reasoningTone(b.Model, "")
+	tone, _ := s.requestedTone(b.Model, "")
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(s.settings.get().ChatTimeoutSeconds)*time.Second)
 	defer cancel()
@@ -1025,7 +1003,7 @@ func (s *Server) openaiModels(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	data := modelCatalog()
+	data := s.catalogModels()
 	created := time.Now().Unix()
 	for _, model := range data {
 		model["created"] = created
@@ -1157,7 +1135,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 	if body.Reasoning != nil && strings.TrimSpace(body.Reasoning.Effort) != "" {
 		effort = body.Reasoning.Effort
 	}
-	tone, toneErr := reasoningTone(body.Model, effort)
+	tone, toneErr := s.requestedTone(body.Model, effort)
 	if toneErr != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", toneErr.Error())
 		return

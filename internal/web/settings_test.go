@@ -6,6 +6,27 @@ import (
 	"testing"
 )
 
+func TestDefaultRuntimeSettingsMatchOriginalAPK(t *testing.T) {
+	for _, name := range []string{
+		"M365_MAX_TOOL_CALLS_PER_TURN", "M365_MAX_TOOL_ROUNDS", "M365_CONTEXT_WINDOW",
+		"M365_MAX_OUTPUT_TOKENS", "M365_CHAT_TIMEOUT_SECONDS", "M365_IMAGE_TIMEOUT_SECONDS",
+	} {
+		t.Setenv(name, "")
+	}
+	got := defaultRuntimeSettings()
+	if got.MaxToolCallsPerTurn != 32 || got.MaxToolRounds != 512 || got.ContextWindow != 262144 || got.MaxOutputTokens != 16384 || got.ChatTimeoutSeconds != 600 || got.ImageTimeoutSeconds != 180 {
+		t.Fatalf("original APK defaults not restored: %#v", got)
+	}
+	if len(got.ModelMappings) != 3 {
+		t.Fatalf("model mappings=%#v", got.ModelMappings)
+	}
+	for _, mapping := range got.ModelMappings {
+		if mapping.UpstreamTone != "Gpt_5_6_Reasoning" || mapping.DefaultReasoningLevel != "xhigh" {
+			t.Fatalf("model mapping=%#v", mapping)
+		}
+	}
+}
+
 func TestLimitToolCalls(t *testing.T) {
 	calls := []detectedToolCall{{Name: "a"}, {Name: "b"}, {Name: "c"}}
 	got := limitToolCalls(calls, 1)

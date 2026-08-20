@@ -67,5 +67,62 @@ code=$(curl -sS --max-time 3 -c "$COOKIE" -b "$COOKIE" \
 code=$(curl -sS --max-time 3 -c "$COOKIE" -b "$COOKIE" \
   -o /dev/null -w '%{http_code}' "$BASE/api/health" 2>/dev/null || true)
 [ "$code" = 200 ] || { echo "GET /api/health 返回 $code" >&2; cat "$LOG" >&2; exit 1; }
-printf 'QEMU smoke OK: package APK=%s; /=%s /login=%s login=%s /api/health=%s\n' \
-  "$(basename "$APK")" 200 200 200 200
+
+MODELS="$WORK/models.json"
+code=$(curl -sS --max-time 5 -c "$COOKIE" -b "$COOKIE" \
+  -o "$MODELS" -w '%{http_code}' "$BASE/api/admin/models" 2>/dev/null || true)
+[ "$code" = 200 ] || { echo "GET /api/admin/models 返回 $code" >&2; cat "$LOG" >&2; exit 1; }
+python3 - "$MODELS" <<'PY'
+import json, sys
+payload = json.load(open(sys.argv[1], encoding='utf-8'))
+want = [
+    'gpt-5.2', 'gpt-5.2-reasoning', 'gpt-5.3', 'gpt-5.3-reasoning',
+    'gpt-5.4', 'gpt-5.4-reasoning', 'gpt-5.5', 'gpt-5.5-reasoning',
+    'gpt-5.6-reasoning', 'claude-sonnet', 'claude-sonnet-reasoning',
+    'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
+]
+data = payload.get('data')
+if payload.get('object') != 'list' or not isinstance(data, list):
+    raise SystemExit(f'模型目录结构错误: {payload!r}')
+ids = [model.get('id') for model in data]
+if ids != want:
+    raise SystemExit(f'模型目录错误: {ids!r}, want {want!r}')
+if any(str(model_id).lower().endswith('-chat') for model_id in ids):
+    raise SystemExit(f'内部 tone 泄漏为公开模型名: {ids!r}')
+if any('configured' in model for model in data):
+    raise SystemExit('模型目录不应包含 recovered-only configured 字段')
+PY
+
+SETTINGS="$WORK/settings.json"
+code=$(curl -sS --max-time 5 -c "$COOKIE" -b "$COOKIE" \
+  -o "$SETTINGS" -w '%{http_code}' "$BASE/api/admin/settings" 2>/dev/null || true)
+[ "$code" = 200 ] || { echo "GET /api/admin/settings 返回 $code" >&2; cat "$LOG" >&2; exit 1; }
+python3 - "$SETTINGS" <<'PY'
+import json, sys
+payload = json.load(open(sys.argv[1], encoding='utf-8'))
+settings = payload.get('settings', {})
+want = {
+    'maxToolCallsPerTurn': 32,
+    'maxToolRounds': 512,
+    'contextWindow': 262144,
+    'maxOutputTokens': 16384,
+    'chatTimeoutSeconds': 600,
+    'imageTimeoutSeconds': 180,
+}
+for key, value in want.items():
+    if settings.get(key) != value:
+        raise SystemExit(f'设置 {key}={settings.get(key)!r}, want {value!r}')
+want_tones = [
+    'Gpt_5_2_Chat', 'Gpt_5_2_Reasoning', 'Gpt_5_3_Chat', 'Gpt_5_3_Reasoning',
+    'Gpt_5_4_Chat', 'Gpt_5_4_Reasoning', 'Gpt_5_5_Chat', 'Gpt_5_5_Reasoning',
+    'Gpt_5_6_Reasoning', 'Claude_Sonnet', 'Claude_Sonnet_Reasoning',
+]
+if payload.get('upstreamTones') != want_tones:
+    raise SystemExit(f'upstreamTones={payload.get("upstreamTones")!r}')
+PY
+
+code=$(curl -sS --max-time 3 -c "$COOKIE" -b "$COOKIE" \
+  -X POST -o /dev/null -w '%{http_code}' "$BASE/api/admin/models/sync" 2>/dev/null || true)
+[ "$code" = 404 ] || { echo "POST /api/admin/models/sync 返回 $code，原 APK 不存在该入口" >&2; cat "$LOG" >&2; exit 1; }
+printf 'QEMU smoke OK: APK=%s; /=%s /login=%s login=%s health=%s models=%s settings=%s sync=%s\n' \
+  "$(basename "$APK")" 200 200 200 200 200 200 404

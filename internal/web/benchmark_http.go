@@ -45,16 +45,17 @@ func (s *Server) adminAccountHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+var benchmarkReasoningEfforts = []string{"low", "medium", "high", "xhigh", "max"}
+
 func (s *Server) adminBenchmark(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	jsonOut(w, map[string]any{
-		"run":          s.benchmark.snapshot(),
-		"tasks":        benchTaskCatalog(),
-		"efforts":      advertisedReasoningEfforts,
-		"defaultModel": defaultBenchmarkModel(),
+		"run":     s.benchmark.snapshot(),
+		"tasks":   benchTaskCatalog(),
+		"efforts": benchmarkReasoningEfforts,
 	})
 }
 
@@ -71,16 +72,19 @@ func benchmarkEffort(value string) (string, error) {
 
 // benchmarkDefaultModel is kept pure so request handlers and tests do not
 // need to mutate the process-wide settings singleton merely to select a route.
-// The broad compatibility catalog contains historic/tenant-dependent aliases;
-// using one of those as the benchmark default can yield a generic upstream
-// refusal even though the gateway itself is healthy.
+// The configured gpt-5.6-* aliases depend on a tenant-specific tone. The APK
+// benchmark defaults to the stable built-in reasoning route instead.
 func benchmarkDefaultModel(mappings []modelMapping) string {
+	for _, model := range gatewayModels {
+		if model.ID == "gpt-5.6-reasoning" {
+			return model.ID
+		}
+	}
 	for _, mapping := range mappings {
 		if model := strings.TrimSpace(mapping.PublicModel); model != "" && strings.TrimSpace(mapping.UpstreamTone) != "" {
 			return model
 		}
 	}
-	// Preserve the old API fallback for installations with no mappings.
 	return "gpt-5.6-reasoning"
 }
 
