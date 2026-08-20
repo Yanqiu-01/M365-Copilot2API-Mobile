@@ -854,6 +854,18 @@ func (s *Server) runBenchTask(ctx context.Context, task benchTask, model, effort
 
 	passed, total, failures := task.Grader(final)
 	testsPass, testRuns := workspace.testStatus()
+	// 闭环判定必须落在最终快照上。workspace.testsPass 记录的是「最后一次
+	// run_tests 调用时」的结论，而 write_file 不会重置它：模型常见的轨迹是
+	// 写代码 → run_tests 失败 → 改对 → 直接收尾，此时 testsPass 仍停留在
+	// false，尽管当前代码已经满分。此前据此把 net 清成 floor，出现过
+	// 「原始 10/10、地板 0、最终 0%」这种把做对的工作判成零分的结果。
+	//
+	// 因此改为：若最终快照本身已通过全部检查，就认定闭环达成（等价于在
+	// 收尾处替模型补跑一次 run_tests，评分标准并未放宽）；只有最终代码确实
+	// 不满分时，才追加闭环未通过的惩罚。
+	if task.Category == "coding" && total > 0 && passed == total {
+		testsPass = true
+	}
 	net := passed
 	if task.Category == "coding" && !testsPass {
 		failures = append(failures, "最新代码未通过 run_tests 闭环验证")

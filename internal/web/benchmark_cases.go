@@ -358,10 +358,12 @@ func gradeInventory(files map[string]string) (int, int, []string) {
 
 	// Defect 5: release must clamp or otherwise guard the lower bound.
 	report.total++
-	if containsAny(releaseBody, "max(0", "if result < 0", "if self.reserved", "reserved = 0", "reserved = max") || containsAny(availableBody, "max(0", "if result < 0") {
+	// 常见的正确写法有多种：max(0, ...)、min(qty, reserved)、先比较再减、
+	// 或在 available 侧夹紧。此前列举过窄，正确实现也会被判缺陷。
+	if releaseGuardsLowerBound(releaseBody) || releaseGuardsLowerBound(availableBody) {
 		report.passed++
 	} else {
-		report.failures = append(report.failures, "缺陷5 release 后 reserved 可能为负")
+		report.failures = append(report.failures, "缺陷5 release 后 reserved 不为负")
 	}
 
 	return report.tally()
@@ -371,6 +373,84 @@ func gradeInventory(files map[string]string) (int, int, []string) {
 // 空列表除零。APK 证据（benchmark_cases.go，结束行 775，3360 字节）：
 // 内嵌 531 字节的 stats.py 原文用于「与原始文件完全一致」判定，
 // 其余检查项均为对提交源码的静态匹配。
+
+// emptyListSkipsMax 判定空输入路径上不会执行 max(rows)。
+//
+// 认定通过的形态：
+//   - 源码里根本没有 max(rows)（改用了别的求最大值方式）；
+//   - 空列表在 max 之前就已提前返回（return 出现在 max 之前）；
+//   - max 调用本身带条件（三元表达式或 max(rows) if rows else None）。
+func emptyListSkipsMax(source string) bool {
+	maxAt := strings.Index(source, "max(rows)")
+	if maxAt < 0 {
+		return true
+	}
+	guardAt := firstIndex(source, "if not rows", "if len(rows) == 0", "if count == 0", "len(rows) > 0")
+	if guardAt >= 0 {
+		// 守卫之后出现 return/raise，且位置在 max 之前，即空列表不会走到 max。
+		exitAt := firstIndexFrom(source, guardAt, "return", "raise")
+		if exitAt >= 0 && exitAt < maxAt {
+			return true
+		}
+	}
+	// 条件化的 max：max(rows) if rows else None / rows and max(rows)。
+	tail := source[maxAt:]
+	if head := strings.IndexAny(tail, "\r\n"); head >= 0 {
+		tail = tail[:head]
+	}
+	if strings.Contains(tail, "if rows") || strings.Contains(tail, "if count") {
+		return true
+	}
+	line := currentLine(source, maxAt)
+	return strings.Contains(line, "rows and") || strings.Contains(line, "if rows else")
+}
+
+// releaseGuardsLowerBound 判定 release/available 是否防止 reserved 变负。
+func releaseGuardsLowerBound(body string) bool {
+	if body == "" {
+		return false
+	}
+	// 只认真正夹住下界的写法。不能把「出现了 reserved 减法」当作守卫：
+	// 原始缺陷代码正是 reserved.get(sku, 0) - qty，一旦纳入就会把缺陷判成
+	// 已修复（实测会让有缺陷的样本从 2/7 虚高到 3/7）。
+	return containsAny(body,
+		"max(0", "max( 0", "min(qty", "min(amount", "min(count",
+		"if result < 0", "if new < 0", "if value < 0", "if current < ",
+		"if self.reserved", "reserved = 0", "reserved = max",
+		"> reserved", ">= reserved", "clamp",
+	)
+}
+
+// firstIndexFrom 从 offset 起查找任一标记的最早位置。
+func firstIndexFrom(source string, offset int, markers ...string) int {
+	if offset < 0 || offset > len(source) {
+		return -1
+	}
+	best := -1
+	for _, marker := range markers {
+		if i := strings.Index(source[offset:], marker); i >= 0 {
+			abs := offset + i
+			if best < 0 || abs < best {
+				best = abs
+			}
+		}
+	}
+	return best
+}
+
+// currentLine 返回 index 所在的整行。
+func currentLine(source string, index int) string {
+	if index < 0 || index >= len(source) {
+		return ""
+	}
+	start := strings.LastIndexAny(source[:index], "\r\n") + 1
+	end := strings.IndexAny(source[index:], "\r\n")
+	if end < 0 {
+		return source[start:]
+	}
+	return source[start : index+end]
+}
+
 func gradeDebug(files map[string]string) (int, int, []string) {
 	report := &gradeReport{}
 	source, ok := files["stats.py"]
@@ -380,10 +460,14 @@ func gradeDebug(files map[string]string) (int, int, []string) {
 		return report.tally()
 	}
 	report.check(strings.TrimSpace(source) != strings.TrimSpace(debugOriginalStats), "与原始文件完全一致，未改写")
-	report.check(!strings.Contains(source, "].2f}"), "仍含 .2f 非法写法，应使用 :.2f 或先格式化")
-	report.check(containsAny(source, ":.2f", "round(", "format("), "未见两位小数格式化，mean 需保留两位小数")
-	report.check(containsAny(source, "if not rows", "if len(rows) == 0", "if count == 0"), "未见空输入判断，空列表需有守卫")
-	report.check(!strings.Contains(source, `"max": max(rows),`), "仍无条件 max(rows)，空列表时 mean/max 应返回 None")
+	report.check(!strings.Contains(source, "].2f}"), "仍含 .2f 非法写法")
+	report.check(containsAny(source, ":.2f", "round(", "format("), "未见两位小数格式化")
+	report.check(containsAny(source, "if not rows", "if len(rows) == 0", "if count == 0", "if rows else", "len(rows) > 0"), "未见空输入判断")
+	// APK 的两条文案是「仍无条件 max(rows)」+「空列表时跳过 max」：要判定的
+	// 是「空列表路径上不会执行 max」，而非源码里不得出现 max(rows)。
+	// 先 return/短路再调用 max 是完全正确的写法，此前按字符串存在与否判定，
+	// 把带守卫的正确解判成缺陷（实测正确解只得 5/6，扣的就是这一条）。
+	report.check(emptyListSkipsMax(source), "仍无条件 max(rows)，空列表时跳过 max")
 	report.check(strings.Contains(source, "def summarize") && strings.Contains(source, "def format_report"), "summarize 与 format_report 两个函数都还在")
 	return report.tally()
 }

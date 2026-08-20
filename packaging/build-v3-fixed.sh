@@ -27,8 +27,8 @@ fi
 NEW_PKG=com.m365.gateway3
 OLD_PKG=com.m365.gateway
 NEW_LABEL='M365 网关 v3 修复版'
-VERSION_CODE=75
-VERSION_NAME=2.24.16
+VERSION_CODE=76
+VERSION_NAME=2.24.17
 # 密钥库必须固定在仓库内，不能落在输出目录：此前默认 $OUT/...，而每个
 # 版本用独立输出目录，keytool 因此每次都新生成一份密钥，导致每版签名都不
 # 一样，升级时必须先卸载。签名一致才能覆盖安装并保留数据。
@@ -142,10 +142,10 @@ for token in (f'{old_pkg}.wake', f'{old_pkg}.KEEPALIVE', f'{old_pkg}.START',
             raise SystemExit(f'old private identity remains: {token} in {path}')
 PY
 
-# 让原生诊断页记住登录：DiagActivity 把 cookie 存在实例字段里，页面一关就
-# 丢，每次进「网关诊断」都要重输密码，采集到的帧也跟着看不见。dex 里没有任何
-# SharedPreferences 调用，只能在 smali 层注入。
-python3 "$REPO/packaging/patch-diag-cookie.py" "$OUT/work/smali"
+# 诊断页 cookie 持久化补丁已停用：2.24.15 实测点击「网关诊断」直接闪退。
+# 注入位置在构造函数与登录回调内，寄存器/异常表处理不当会导致 Activity
+# 初始化即崩溃。保留脚本供后续验证，但不再参与构建。
+# python3 "$REPO/packaging/patch-diag-cookie.py" "$OUT/work/smali"
 
 printf '%s\n' '== 4/6 打包（必须使用 aapt2）=='
 apktool b "$OUT/work" --use-aapt2 -o "$OUT/unsigned.apk"
