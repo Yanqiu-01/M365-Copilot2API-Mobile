@@ -276,35 +276,12 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 		}
 		return nil
 	}
-	// ChatHub signals text either as a full snapshot or as cursor rewrites.
-	// Only the portion not already streamed may be emitted; naive prefix
-	// checks misfire when upstream rewrites the whole buffer, which duplicated
-	// answers (AAA…). Match any overlap and emit the tail.
-	// Upstream rate limiting surfaces as a human-readable notice on the text
-	// channel instead of an HTTP 429. Detect it before any real content has
-	// streamed so the web layer can fail over rather than answer with it.
-	// The "throttling" frame itself is per-conversation quota metadata and is
-	// NOT a rate-limit signal.
-	rateLimited := func(text string) bool {
-		if streamed.Len() != 0 {
-			return false
-		}
-		t := strings.ToLower(text)
-		return strings.Contains(t, "temporarily unable to respond to this many requests") ||
-			strings.Contains(t, "太多请求") ||
-			strings.Contains(t, "无法响应这么多请求") ||
-			strings.Contains(t, "too many requests") ||
-			strings.Contains(t, "please retry") && strings.Contains(t, "later")
-	}
 	emitSnapshot := func(snapshot string) error {
 		if snapshot == "" {
 			return nil
 		}
 		if chTrace {
 			log.Printf("[trace:emitSnapshot] cur=%d snapshot=%d", streamed.Len(), len(snapshot))
-		}
-		if rateLimited(snapshot) {
-			return ErrRateLimitNotice
 		}
 		cur := streamed.String()
 		if cur == "" {
@@ -463,9 +440,6 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 						rawResult, _ = res["value"].(string)
 						if msg, ok := res["message"].(string); ok {
 							final = msg
-							if rateLimited(final) {
-								return Result{}, ErrRateLimitNotice
-							}
 						}
 					}
 				}
@@ -485,12 +459,11 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 				if text == "" {
 					text = strings.Join(deltas, "")
 				}
-				if rateLimited(text) {
-					return Result{}, ErrRateLimitNotice
-				}
-				if text == "" {
-					return Result{}, ErrEmptyCompletion
-				}
+				// 原 APK 不对回复文本做限流/拒绝判定，也没有
+				// ErrEmptyCompletion：模型的短回答（含「很抱歉，我无法
+				// 响应」这类内容层拒绝）是成功响应，必须原样返回。
+				// 传输层异常另由 classifyUpstream 一侧的 ws dial /
+				// ws read before completion / completion error 覆盖。
 				// pump 已按帧推送并累计全部思考内容，直接采用即可；
 				// 不再从原始帧重算，避免与已发送的增量重复。
 				reasoning := reasoningPump.text()

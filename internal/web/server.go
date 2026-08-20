@@ -1489,7 +1489,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 				if IsRateLimited(routeErr) {
 					msg = "upstream is rate limiting; try again shortly"
 				}
-				writeOpenAIError(w, http.StatusBadGateway, "tool_router_error", msg)
+				writeOpenAIError(w, http.StatusBadGateway, "router_error", msg)
 				return
 			}
 			s.accountPool.MarkSuccess(acc.ID)
