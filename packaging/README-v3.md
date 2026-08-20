@@ -9,13 +9,31 @@
 | APK | `M365-Gateway-v3-fixed.apk` |
 | 包名 | `com.m365.gateway3` |
 | 应用名 | `M365 网关 v3 修复版` |
-| versionName / versionCode | `2.24.3` / `62` |
+| versionName / versionCode | `2.24.4` / `63` |
 | ABI | `arm64-v8a` |
-| SHA-256 | `d77b146385e3cc71972e3970254ea56606d94fcd291d3e7c3cc0c86c736954b4` |
+| SHA-256 | `078fe9e55b5e033f0b4cc60b06196629598ecb882b100d049523abd5a2a071f5` |
 
-本次 `2.24.3 / 62` 是对此前 `2.24.2 / 61` v3 的覆盖更新；两者包名和签名相同，可以直接升级。原版 `com.m365.gateway` 与 v2 `com.m365.gateway2` 不受影响。
+本次 `2.24.4 / 63` 是对此前 `2.24.3 / 62` v3 的覆盖更新；两者包名和签名相同，可以直接升级。原版 `com.m365.gateway` 与 v2 `com.m365.gateway2` 不受影响。
 
-## 本次 v3 启动修复
+## 本次 2.24.4 修复：模型目录与路由回归原版
+
+以在 QEMU 中运行原始 `libm365.so` 的实测结果为准，修正了此前恢复源码擅自改动的模型面板：
+
+1. **模型目录恢复为原版内容**
+   `/api/admin/models` 与 `/v1/models` 现在返回与原 APK 完全一致的目录：11 个内置公开模型加上设置中的 3 个可配置别名，默认共 14 项。此前恢复版只暴露 3 个 `gpt-5.6-*` 别名，把内置模型全部藏掉了，前端“模型测试”页因此几乎无模型可选。
+2. **补回 `gpt-5.3-reasoning` 路由**，并移除原 APK 中不存在的 `claude-opus-4-*`、`claude-sonnet-4-6`、`claude-fable-5`、`gpt-image-2` 等条目和对应 tone。
+3. **移除虚构的动态同步链路**
+   原 APK 没有 `/api/admin/models/sync`，也不会去 CDN 抓取 tone 列表。相关端点、后台抓取和缓存已删除，上游 tone 恢复为固定 11 项。
+4. **默认参数回归原版**
+   上下文窗口 `262144`、聊天超时 `600` 秒、图片超时 `180` 秒、`clientProfile` 默认 `office`、三个可配置别名默认档位均为 `xhigh`。
+5. **评测默认模型改回稳定内置路由**
+   空模型评测使用 `gpt-5.6-reasoning`，不再默认落到依赖租户开通情况的 `gpt-5.6-sol` 别名；评测端点响应结构也回归原版。
+6. **前端不再过滤内置模型**
+   模型测试和评测下拉恢复展示完整目录。
+
+`Gpt_5_2_Chat`、`Gpt_5_6_Reasoning` 这类名称是服务端内部的 ChatHub tone，只用于把公开模型路由到上游，不作为模型 ID 暴露；公开模型名中不存在任何 `-chat` 后缀。
+
+## v3 改名启动修复
 
 此前改包名后点击 v3 立即闪退，原因是 manifest 中的组件使用相对类名（例如 `.MainActivity`）。Android 会将其解析为 `com.m365.gateway3.MainActivity`，但 DEX 中实际类仍位于 `com.m365.gateway.*`。
 
@@ -85,6 +103,7 @@ GOOS=android GOARCH=arm64 GOARM64=v8.0
 - 两个 native entry 均为未压缩、可执行权限；
 - `libcloudflared.so` 与原 APK 内容一致；
 - 从最终 APK 提取出的 `libm365.so` 在 QEMU AArch64 环境中启动成功：`/`、`/login`、管理员登录和鉴权后的 `/api/health` 均返回 200；可用 `packaging/qemu-smoke.sh` 重跑。
+- 端点级原版对照：最终 APK 的 `/api/admin/models` 与原始 APK 的实测响应逐字段一致（14 项模型、全部元数据），`/api/admin/settings` 除监听端口外完全一致，`upstreamTones` 与 `codexModels` 一致，`/api/admin/models/sync` 与原版同为 404。这些断言已内置到 `packaging/qemu-smoke.sh` 和 `internal/web/apk_contract_test.go`（夹具取自原始二进制实测结果）。
 
 QEMU 只验证了 Go 子进程和 HTTP 服务，不提供 Android framework、Manifest 组件解析或真实 nativeLibraryDir 环境。工作区没有 `adb`、Android emulator 或真机，因此**尚未完成真实设备上的点击启动测试**。静态检查已经覆盖本次已定位的闪退原因，但仍请在你的 ARM64 Android 设备上实测。
 
