@@ -331,9 +331,7 @@ func gradeInventory(files map[string]string) (int, int, []string) {
 	// Defect 2: failed reserve must not append to trail. If an append remains,
 	// all validation must precede it.
 	report.total++
-	appendAt := strings.Index(reserveBody, "self.trail.append")
-	validationAt := firstIndex(reserveBody, "if qty", "if available", "if self.available", "raise StockError", "raise KeyError")
-	if appendAt < 0 || (validationAt >= 0 && validationAt < appendAt) {
+	if trailOnlyOnSuccess(reserveBody) {
 		report.passed++
 	} else {
 		report.failures = append(report.failures, "缺陷2 失败操作不写入 trail")
@@ -341,7 +339,7 @@ func gradeInventory(files map[string]string) (int, int, []string) {
 
 	// Defect 3: unknown SKUs must raise KeyError.
 	report.total++
-	if strings.Contains(reserveBody, "KeyError") {
+	if raisesKeyErrorForUnknownSKU(reserveBody) {
 		report.passed++
 	} else {
 		report.failures = append(report.failures, "未见 KeyError")
@@ -350,7 +348,7 @@ func gradeInventory(files map[string]string) (int, int, []string) {
 	// Defect 4: reservation must compare against available stock, not merely
 	// on_hand. The exact available expression is present in the APK strings.
 	report.total++
-	if containsAny(reserveBody, "available(", "available =", "self.available", "on_hand.get(sku, 0) - self.reserved.get(sku, 0)", "self.on_hand.get(sku, 0) - self.reserved.get(sku, 0)") && strings.Contains(reserveBody, "reserved") {
+	if reservesAgainstAvailable(reserveBody) {
 		report.passed++
 	} else {
 		report.failures = append(report.failures, "预留未依据可用量")
@@ -367,6 +365,101 @@ func gradeInventory(files map[string]string) (int, int, []string) {
 	}
 
 	return report.tally()
+}
+
+// raisesKeyErrorForUnknownSKU 判断未知 sku 是否会抛 KeyError。
+//
+// 除了显式 raise KeyError，直接下标访问 self.on_hand[sku] / self.reserved[sku]
+// 在 Python 中本身就抛 KeyError，这是惯用且正确的写法。此前只认字面
+// "KeyError"，直接索引的正确实现被判为未修复。
+func raisesKeyErrorForUnknownSKU(body string) bool {
+	if body == "" {
+		return false
+	}
+	if strings.Contains(body, "KeyError") {
+		return true
+	}
+	compact := strings.Join(strings.Fields(body), "")
+	// 下标访问（非 .get）即隐式 KeyError。
+	return containsAny(compact,
+		"self.on_hand[sku]", "self.on_hand[key]", "self.on_hand[item]",
+		"self.reserved[sku]"+"-", // 读取后参与运算，说明依赖其存在
+	) && !strings.Contains(compact, "self.on_hand.get(sku,0)+qty")
+}
+
+// reservesAgainstAvailable 判断预留是否依据可用量（on_hand - reserved）
+// 而非仅 on_hand。
+//
+// 允许把可用量先赋给中间变量再比较 —— free / remaining / avail 等命名都常见。
+// 此前要求可用量表达式与比较紧邻，先算变量再比较的正确写法被判为未修复。
+func reservesAgainstAvailable(body string) bool {
+	if body == "" {
+		return false
+	}
+	if !strings.Contains(body, "reserved") {
+		return false
+	}
+	compact := strings.Join(strings.Fields(body), "")
+	// 直接调用 available()。
+	if containsAny(compact, "self.available(", "available(sku)") {
+		return true
+	}
+	// 差值可能直接写出，也可能先把 on_hand 取到局部变量再与 reserved 相减。
+	// 逐行扫描：任一行同时出现「减号」「reserved」与某个库存来源即认定。
+	for _, line := range strings.Split(body, "\n") {
+		flat := strings.Join(strings.Fields(line), "")
+		if !strings.Contains(flat, "-") || !strings.Contains(flat, "reserved") {
+			continue
+		}
+		if containsAny(flat, "on_hand", "stock", "onhand") {
+			return true
+		}
+		// 形如 free = stock - self.reserved.get(...)：库存已在别处取出，
+		// 此处只要求减去 reserved，且被减数不是字面量。
+		if idx := strings.Index(flat, "-self.reserved"); idx > 0 {
+			left := flat[:idx]
+			if i := strings.LastIndex(left, "="); i >= 0 {
+				left = left[i+1:]
+			}
+			if left != "" && !isNumericLiteral(left) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// trailOnlyOnSuccess 判断 trail 是否只在变更成功后写入。
+//
+// 契约要求「trail 只记录成功的变更」。判定标准是 append 之后不再有任何抛异常
+// 的路径 —— 只要 append 后面还有 raise，失败时就已经污染了 trail。
+//
+// 原实现只检查「是否存在任一校验早于 append」，而原始缺陷代码恰好满足
+// （if qty < 1 在 append 之前，库存校验在之后），因此这条缺陷从未被检出：
+// 原始文件实测 3/7，与地板分相同，模型即使修好它也拿不到这一分。
+func trailOnlyOnSuccess(body string) bool {
+	appendAt := strings.Index(body, "self.trail.append")
+	if appendAt < 0 {
+		// 没有写 trail：不构成「失败也记录」的缺陷。
+		return true
+	}
+	tail := body[appendAt:]
+	// append 之后仍存在抛异常路径即为缺陷。
+	return !containsAny(tail, "raise ", "raise\t")
+}
+
+// isNumericLiteral 判断字符串是否为纯数字字面量。
+func isNumericLiteral(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // rejectsNonPositiveQty 判断 add 的下界守卫是否把 0 也挡住。
