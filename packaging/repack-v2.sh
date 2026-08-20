@@ -24,7 +24,11 @@ NEW_LABEL='M365 网关 v2'
 VERSION_CODE=60
 VERSION_NAME=2.24.1
 KS=${KS:-$OUT/m365-gateway-v2.jks}
-KS_PASS=${KS_PASS:-[REDACTED]}
+# 口令不设默认值：仓库是公开的，硬编码等于把签名身份一并发布。
+if [ -z "${KS_PASS:-}" ]; then
+  echo "错误：未提供 KS_PASS。用法：KS_PASS=你的口令 bash $0 ..." >&2
+  exit 2
+fi
 KS_ALIAS=${KS_ALIAS:-m365v2}
 
 mkdir -p "$OUT"
