@@ -126,5 +126,43 @@ conn.ReadMessage。
 ### 验证
 build / vet / 全部测试 / Android arm64 PIE 均通过；QEMU 冒烟确认免密豁免
 与鉴权边界不变（4 个只读端点与 2 个开关 200，settings/keys 仍 401）。
-`go test -race` 仍受沙箱 VMA 限制无法执行 —— 并发安全未经验证，这一项需要
-在真机或支持 race 的环境补做。
+### race 检测：已查明根因，改用压力测试替代
+
+`go test -race` 在本环境无法运行，原因已查实（不是配置问题）：
+
+Android 内核用 39 位用户地址空间（`CONFIG_ARM64_VA_BITS=39`），而 Go 的 arm64
+TSan 运行时硬编码要求 48 位。验证过程：
+1. race 二进制**能正常编译**（27 MB），说明只是运行期拦截；
+2. `TSAN_OPTIONS` 无任何相关开关；
+3. QEMU 用户态继承宿主内核布局，实测 mmap 仍返回 39 位地址；
+4. 反汇编 `race_linux_arm64.syso`，定位 `__tsan::InitializePlatformEarly` 中的
+   `clz` → `cmp w0, #0x30` → `b.ne` → `Printf` + `Die()`；
+5. 把 `b.ne` 改成 `nop` 绕过检查后，报错变成
+   `failed to allocate 0x2010000 bytes at address 200002b60000` ——
+   TSan 要在约 35 TB 处映射影子内存，而 39 位空间上限 512 GB，该地址不存在。
+
+结论：这是内核编译选项，非 root 不可更改，无法绕过。syso 已还原（SHA-256 校验
+一致）。
+
+替代方案：新增 `concurrency_stress_test.go`，6 项高并发压力测试 +
+状态一致性断言：
+
+| 测试 | 覆盖 | 规模 |
+|---|---|---|
+| AdminSessionAccess | adminSessions 并发读写与过期清理 | 40 goroutine × 150 次 |
+| SettingsAccess | 设置高频读 + 并发写 | 30 读 + 6 写 |
+| UsageRecording | 用量累加不丢记录 | 32 × 100，断言总数 |
+| FrameCapture | 抓帧并发写入 | 24 × 80 |
+| AccountStateUpdates | 冷却/健康状态并发更新 | 24 goroutine |
+| HTTPRequests | 端到端：中间件+鉴权+设置读取 | 1280 次请求 |
+
+关键：前两版这些测试有两项是**空转**（帧捕获开关默认关闭、`MarkFailure` 需要
+可识别的错误类型），实测"保留 0 组帧""健康记录 0 条"。已加
+`t.Fatal` 断言强制要求真正触达代码路径，现在分别记录 50 组帧与 3 条健康记录。
+
+以 `GOMAXPROCS=8` 重复 30 轮全部通过，Go 的 map 并发读写会直接 fatal
+（不可 recover），因此这类问题若存在会稳定暴露。
+
+局限：压力测试不保证捕获所有数据竞争，尤其是低频窗口。若将来能在 48 位环境
+（x86_64 机器、或 `CONFIG_ARM64_VA_BITS=48` 的内核）运行，仍应补跑
+`go test -race ./...`。
