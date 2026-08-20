@@ -36,6 +36,10 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request) {
 	}
 	acc, err := s.resolveAccount(body.AccountID)
 	if err != nil {
+		if isAccountResolveFailure(err) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		writeUpstreamError(w, err)
 		return
 	}

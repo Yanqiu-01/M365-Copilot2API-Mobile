@@ -118,7 +118,6 @@ type Client struct {
 	HTTPHeader http.Header
 	HTTPClient *http.Client
 	Dialer     *websocket.Dialer
-	Preheater  *Preheater
 	Trace      func(map[string]any)
 }
 
@@ -132,7 +131,6 @@ func NewClient() *Client {
 		HTTPHeader: h,
 		HTTPClient: outbound.HTTPClient(),
 		Dialer:     d,
-		Preheater:  NewPreheater(d, h),
 	}
 }
 
@@ -206,42 +204,24 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 	}
 
 	dialStarted := time.Now()
-	var conn *websocket.Conn
-	var reused bool
-	if c.Preheater != nil {
-		conn = c.Preheater.Take(acc.OID, acc.TID)
-		if conn != nil {
-			reused = true
-		}
-	}
-	if conn == nil {
-		var resp *http.Response
-		conn, resp, err = c.Dialer.DialContext(ctx, wsURL, c.HTTPHeader.Clone())
-		if err != nil {
-			if resp != nil && (resp.StatusCode == 429 || resp.StatusCode == 401 || resp.StatusCode == 403) {
-				retryAfter := 0
-				if v, _ := strconv.Atoi(resp.Header.Get("Retry-After")); v > 0 {
-					retryAfter = v
-				}
-				log.Printf("chathub ws_dial %d Retry-After=%d", resp.StatusCode, retryAfter)
-				return Result{}, &DialError{Status: resp.StatusCode, RetryAfter: retryAfter}
+	// 每次请求都新建 WebSocket。wsURL 里带着本次请求的 chatsessionid /
+	// clientrequestid / ConversationId，连接与会话是绑定的，跨请求复用会让
+	// 上游把 payload 归到另一个会话上，因此原 APK 不做任何连接复用。
+	var resp *http.Response
+	conn, resp, err := c.Dialer.DialContext(ctx, wsURL, c.HTTPHeader.Clone())
+	if err != nil {
+		if resp != nil && (resp.StatusCode == 429 || resp.StatusCode == 401 || resp.StatusCode == 403) {
+			retryAfter := 0
+			if v, _ := strconv.Atoi(resp.Header.Get("Retry-After")); v > 0 {
+				retryAfter = v
 			}
-			return Result{}, fmt.Errorf("ws dial: %w", err)
+			log.Printf("chathub ws_dial %d Retry-After=%d", resp.StatusCode, retryAfter)
+			return Result{}, &DialError{Status: resp.StatusCode, RetryAfter: retryAfter}
 		}
+		return Result{}, fmt.Errorf("ws dial: %w", err)
 	}
-	log.Printf("chathub timing ws_dial_ms=%d total_ms=%d reused=%t", time.Since(dialStarted).Milliseconds(), time.Since(startedAt).Milliseconds(), reused)
+	log.Printf("chathub timing ws_dial_ms=%d total_ms=%d", time.Since(dialStarted).Milliseconds(), time.Since(startedAt).Milliseconds())
 	defer conn.Close()
-
-	if c.Preheater != nil {
-		go func() {
-			warmCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			defer cancel()
-			warmURL, werr := buildWSURL(acc, uuid.NewString(), uuid.NewString(), uuid.NewString())
-			if werr == nil {
-				c.Preheater.Warm(warmCtx, acc.OID, acc.TID, warmURL)
-			}
-		}()
-	}
 
 	if len(req.Attachments) > 0 {
 		if attachErr := <-attachCh; attachErr != nil {
@@ -252,13 +232,11 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 	_ = conn.SetReadDeadline(time.Now().Add(45 * time.Second))
 	_ = conn.SetWriteDeadline(time.Now().Add(15 * time.Second))
 
-	if !reused {
-		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"protocol":"json","version":1}`+rs)); err != nil {
-			return Result{}, fmt.Errorf("handshake send: %w", err)
-		}
-		if _, _, err := conn.ReadMessage(); err != nil {
-			return Result{}, fmt.Errorf("handshake recv: %w", err)
-		}
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"protocol":"json","version":1}`+rs)); err != nil {
+		return Result{}, fmt.Errorf("handshake send: %w", err)
+	}
+	if _, _, err := conn.ReadMessage(); err != nil {
+		return Result{}, fmt.Errorf("handshake recv: %w", err)
 	}
 
 	payload := chatPayload(req.Text, req.SessionID, req.ConversationID, requestID, req.Tone, firstTurn, req.Attachments, req.Tools, req.ToolChoice, req.MCPServerURL)

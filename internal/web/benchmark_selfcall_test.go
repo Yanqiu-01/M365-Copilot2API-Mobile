@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -57,10 +58,14 @@ func TestCallOwnChatCompletionsRoutesThroughOpenAIHandler(t *testing.T) {
 	if len(body) == 0 {
 		t.Fatal("body must be captured from the recorder")
 	}
-	// 响应应是 JSON（handler 统一以 OpenAI 错误结构回复）。
-	var probe map[string]any
-	if err := json.Unmarshal(body, &probe); err != nil {
-		t.Fatalf("response body is not JSON: %v (body=%q)", err, trimForLog(string(body)))
+	// 原 APK 在 /v1/chat/completions 上把账号解析失败作为纯文本返回
+	// （实测 400 "no accounts; login first"），因此这里只能断言响应体
+	// 被真实捕获，不能要求它是 JSON。
+	if !strings.Contains(string(body), "no accounts; login first") {
+		t.Fatalf("unexpected self-call body=%q", trimForLog(string(body)))
+	}
+	if status != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400", status)
 	}
 }
 

@@ -849,6 +849,10 @@ func (s *Server) chatOnce(w http.ResponseWriter, r *http.Request) {
 	}
 	acc, err := s.resolveAccount(body.AccountID)
 	if err != nil {
+		if isAccountResolveFailure(err) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		writeUpstreamError(w, err)
 		return
 	}
@@ -965,6 +969,10 @@ func (s *Server) adminModelTest(w http.ResponseWriter, r *http.Request) {
 	}
 	acc, err := s.resolveAccount("")
 	if err != nil {
+		if isAccountResolveFailure(err) {
+			writeAccountResolveError(w, err, "account_error")
+			return
+		}
 		writeUpstreamError(w, err)
 		return
 	}
@@ -1227,6 +1235,10 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 	acc, err := s.resolveAccount(accountID)
 	if err != nil {
 		log.Printf("[account-route] resolve failed requested=%q err=%v", accountID, err)
+		if isAccountResolveFailure(err) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		writeUpstreamError(w, err)
 		return
 	}

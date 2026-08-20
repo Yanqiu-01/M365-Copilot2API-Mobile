@@ -1,10 +1,43 @@
 package web
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 )
+// errNoAccounts marks "no usable account" conditions. The original APK reports
+// these with the account's own message and a 4xx status (never as a generic
+// 502 upstream failure), so clients can tell "you must log in" apart from
+// "the upstream call broke".
+var errNoAccounts = errors.New("no accounts; login first")
+
+// isAccountResolveFailure reports whether err is a local account-selection
+// failure rather than a failed upstream call.
+func isAccountResolveFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errNoAccounts) {
+		return true
+	}
+	var he *UpstreamHTTPError
+	if errors.As(err, &he) {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "no accounts; login first") ||
+		strings.Contains(msg, "no accounts enabled for scheduling")
+}
+
+// writeAccountResolveError renders an account-selection failure using the
+// original APK contract: the real reason, verbatim, with the caller's own
+// error type.
+func writeAccountResolveError(w http.ResponseWriter, err error, errType string) {
+	writeOpenAIError(w, http.StatusBadRequest, errType, err.Error())
+}
+
 
 // upstreamError keeps transport details, including URLs and credentials, out
 // of client-visible responses while retaining a server-side diagnostic.
